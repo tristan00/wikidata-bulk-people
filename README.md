@@ -144,9 +144,68 @@ wikidata-bulk-people version
 
 ```
 
+## Data reference
+
+Each `Person` object contains the following fields:
+
+| Field | Type | Description |
+|---|---|---|
+| `qid` | `str` | Wikidata entity ID (e.g. `"Q937"`) |
+| `wikipedia_title` | `str \| None` | English Wikipedia article title |
+| `wikipedia_url` | `str \| None` | Full Wikipedia URL |
+| `name` | `str \| None` | Primary English label |
+| `description` | `str \| None` | Short description from Wikidata |
+| `date_of_birth` | `DateValue \| None` | Structured date (year/month/day/calendar/precision) |
+| `date_of_death` | `DateValue \| None` | Structured date |
+| `place_of_birth` | `str \| None` | Place of birth label |
+| `place_of_death` | `str \| None` | Place of death label |
+| `sex_or_gender` | `str \| None` | Gender label |
+| `lead_paragraph` | `str \| None` | First paragraph of the Wikipedia article |
+| `aliases` | `list[str]` | Alternative names |
+| `citizenships` | `list[str]` | Country labels |
+| `occupations` | `list[str]` | Occupation labels |
+| `spouses` | `list[SpouseRecord]` | Structured spouse relationships |
+| `images` | `list[ImageRef]` | Images from Wikimedia Commons |
+
+### Sample data — Albert Einstein (Q937)
+
+**`people` table** (one row per person):
+
+| qid | name | description | dob_year | dob_month | dob_day | dod_year | place_of_birth | place_of_death | sex_or_gender |
+|---|---|---|---|---|---|---|---|---|---|
+| Q937 | Albert Einstein | german-born theoretical physicist (1879–1955) | 1879 | 3 | 14 | 1955 | Ulm | Princeton | male |
+
+**`person_spouses` table** (one row per marriage):
+
+| person_qid | spouse_qid | name | start_year | start_month | start_day | end_year | end_month | end_day | is_former |
+|---|---|---|---|---|---|---|---|---|---|
+| Q937 | Q76346 | Mileva Marić | 1903 | 1 | 16 | 1919 | 2 | 14 | True |
+| Q937 | Q68761 | Elsa Einstein | 1919 | None | None | 1936 | 12 | 20 | True |
+
+**`person_occupations` table** (one row per occupation):
+
+| person_qid | occupation |
+|---|---|
+| Q937 | theoretical physicist |
+| Q937 | philosopher of science |
+| Q937 | inventor |
+| Q937 | … (14 total) | |
+
+**`person_images` table** (one row per image):
+
+| person_qid | filename | width | height | license | is_lead |
+|---|---|---|---|---|---|
+| Q937 | Albert Einstein (Nobel).png | 1080 | 1390 | Public domain | False |
+| Q937 | … (21 total) | | | | |
+
 ## Architecture
 
-See [`docs/architecture.md`](docs/architecture.md) for a full overview.
+The library queries the [Wikidata SPARQL endpoint](https://query.wikidata.org/) in birth-year
+partitions to avoid timeouts on the full ~10 M person dataset. Each partition is fetched via
+keyset pagination (`FILTER(?item > wd:Qxxx)`) so interrupted runs resume from the last cursor.
+Four HTTP clients handle Wikidata entities, Wikipedia article extracts, Wikimedia Commons image
+metadata, and rendered HTML respectively — all with per-host throttling and exponential-backoff
+retries.
 
 ## License
 
