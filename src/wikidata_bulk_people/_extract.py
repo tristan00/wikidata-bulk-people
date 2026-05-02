@@ -385,7 +385,7 @@ class QIDStream:
         self._filter = filter
         self._sparql = _SparqlClient(user_agent=user_agent)
 
-    def __iter__(self) -> Generator[str, None, None]:
+    def __iter__(self) -> Generator[str]:
         partitions = _year_partitions(self._filter)
         for i, partition_year in enumerate(partitions):
             label = str(partition_year) if partition_year is not None else "no-DOB"
@@ -397,7 +397,7 @@ class QIDStream:
             )
             yield from self.iter_partition(partition_year)
 
-    def iter_partition(self, partition_year: int | None) -> Generator[str, None, None]:
+    def iter_partition(self, partition_year: int | None) -> Generator[str]:
         last_qid: str | None = None
         page = 0
         while True:
@@ -666,7 +666,7 @@ def iter_people_pipeline(
     *,
     filter: PeopleFilter,  # noqa: A002
     user_agent: str,
-) -> Generator[Person, None, None]:
+) -> Generator[Person]:
     """Yield :class:`Person` records for all people matching *filter*.
 
     Each record is extracted from Wikidata + Wikipedia. Per-record errors
@@ -742,7 +742,9 @@ def run_people_pipeline(
         with sink:
             # State must be read after sink.__enter__() so that stateful sinks
             # (e.g. DatabaseSink) have an open connection before reading.
-            state = state_mgr.read() if resume else {"completed_partitions": [], "in_progress": None}
+            state = (
+                state_mgr.read() if resume else {"completed_partitions": [], "in_progress": None}
+            )
             completed: set[int | None] = set(state.get("completed_partitions", []))
             in_progress: dict[str, object] | None = state.get("in_progress")
 

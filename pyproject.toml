@@ -82,3 +82,7 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["UP017", "UP042", "UP043"]  # require Python 3.11+ / 3.13+; we support >=3.10
+
+[tool.ruff.lint.per-file-ignores]
+"src/wikidata_bulk_people/enums.py" = ["E501"]  # auto-generated; some QID names are very long
