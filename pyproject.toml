@@ -10,6 +10,7 @@ readme = "README.md"
 license = { file = "LICENSE" }
 authors = [{name = "Tristan Delforge", email = "tristandelforge1@gmail.com"}]
 requires-python = ">=3.10"
+keywords = ["wikidata", "wikipedia", "knowledge-graph", "data-extraction", "nlp", "bulk"]
 dependencies = ["requests>=2.28"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -59,8 +60,8 @@ include = ["src/", "tests/", "LICENSE", "README.md", "CHANGELOG.md", "pyproject.
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--strict-markers"
-markers = []
+addopts = "--strict-markers -m 'not integration'"
+markers = ["integration: live network tests (deselected by default)"]
 
 [tool.coverage.run]
 source = ["wikidata_bulk_people"]
