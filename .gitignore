@@ -18,3 +18,4 @@ htmlcov/
 .pytest_cache/
 *.log
 .DS_Store
+.idea/
