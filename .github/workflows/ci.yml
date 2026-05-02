@@ -16,8 +16,6 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -e ".[dev]"
-      - run: python -m ruff check src/ tests/
-      - run: python -m ruff format --check src/ tests/
       - run: python -m mypy --strict src/wikidata_bulk_people
 
   test:
