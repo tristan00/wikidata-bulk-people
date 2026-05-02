@@ -50,13 +50,16 @@ def _invoke(*args: str) -> pytest.ExceptionInfo[SystemExit]:
     """Call cli.main() with the given argv, always expecting SystemExit."""
     from wikidata_bulk_people import cli
 
-    with patch.object(sys, "argv", ["wikidata-bulk-people", *args]):
-        with pytest.raises(SystemExit) as exc_info:
-            cli.main()
+    with (
+        patch.object(sys, "argv", ["wikidata-bulk-people", *args]),
+        pytest.raises(SystemExit) as exc_info,
+    ):
+        cli.main()
     return exc_info
 
 
 # ── version ──────────────────────────────────────────────────────────────────
+
 
 def test_version(capsys: pytest.CaptureFixture[str]) -> None:
     from wikidata_bulk_people import __version__
@@ -68,12 +71,14 @@ def test_version(capsys: pytest.CaptureFixture[str]) -> None:
 
 # ── no subcommand → exit 1 ────────────────────────────────────────────────────
 
+
 def test_no_subcommand_exits_1() -> None:
     exc = _invoke()
     assert exc.value.code == 1
 
 
 # ── help flags ────────────────────────────────────────────────────────────────
+
 
 def test_people_help(capsys: pytest.CaptureFixture[str]) -> None:
     exc = _invoke("people", "--help")
@@ -88,6 +93,7 @@ def test_person_help(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 # ── person subcommand ─────────────────────────────────────────────────────────
+
 
 def test_person_stdout(capsys: pytest.CaptureFixture[str]) -> None:
     person = _make_person()
@@ -136,6 +142,7 @@ def test_person_transport_error(capsys: pytest.CaptureFixture[str]) -> None:
 
 # ── people subcommand — JSONL ─────────────────────────────────────────────────
 
+
 def test_people_out_jsonl(tmp_path: Path) -> None:
     out = tmp_path / "out.jsonl"
     with patch(_PATCH_EXTRACT_PEOPLE) as mock_ep:
@@ -156,6 +163,7 @@ def test_people_with_born_after(tmp_path: Path) -> None:
 
 
 # ── people subcommand — DB ────────────────────────────────────────────────────
+
 
 def test_people_db(tmp_path: Path) -> None:
     db_url = f"sqlite:///{tmp_path}/out.db"
@@ -185,6 +193,7 @@ def test_people_upsert_without_db(capsys: pytest.CaptureFixture[str], tmp_path: 
 
 # ── people subcommand — CSV ───────────────────────────────────────────────────
 
+
 def test_people_csv_dir(tmp_path: Path) -> None:
     csv_dir = tmp_path / "csv"
     with patch(_PATCH_EXTRACT_PEOPLE_TO_CSV) as mock_csv:
@@ -195,6 +204,7 @@ def test_people_csv_dir(tmp_path: Path) -> None:
 
 
 # ── people subcommand — transport error ──────────────────────────────────────
+
 
 def test_people_transport_error(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     out = tmp_path / "out.jsonl"

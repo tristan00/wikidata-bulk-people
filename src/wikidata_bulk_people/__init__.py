@@ -124,7 +124,7 @@ def iter_people(
     *,
     filter: PeopleFilter | None = None,  # noqa: A002
     user_agent: str = f"wikidata-bulk-people/{__version__} (https://github.com/tristan00/wikidata-bulk-people)",
-) -> Generator[Person, None, None]:
+) -> Generator[Person]:
     """Iterate over all people matching a filter, yielding :class:`Person` objects.
 
     This is the primary API for processing people records in Python. Use this when

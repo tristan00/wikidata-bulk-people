@@ -386,7 +386,7 @@ class DatabaseSink:
 
     def _build_schema(self) -> Any:
         """Build and return a SQLAlchemy MetaData with all table definitions."""
-        import sqlalchemy as sa  # type: ignore[import-untyped]
+        import sqlalchemy as sa
 
         meta = sa.MetaData()
         p = self._tname  # shorthand
@@ -427,7 +427,9 @@ class DatabaseSink:
             sa.Table(
                 p(child_base),
                 meta,
-                sa.Column("person_qid", sa.String, sa.ForeignKey(f"{p('people')}.qid"), nullable=False),
+                sa.Column(
+                    "person_qid", sa.String, sa.ForeignKey(f"{p('people')}.qid"), nullable=False
+                ),
                 sa.Column(value_col, sa.String, nullable=False),
             )
 
@@ -493,7 +495,7 @@ class DatabaseSink:
                 )
 
     def __enter__(self) -> "DatabaseSink":
-        import sqlalchemy as sa  # type: ignore[import-untyped]
+        import sqlalchemy as sa
 
         self._engine = sa.create_engine(self._connection_string)
         self._meta = self._build_schema()
@@ -549,7 +551,7 @@ class DatabaseSink:
 
     def _flush(self) -> None:
         """Write all buffered rows to the database in a single transaction."""
-        import sqlalchemy as sa  # type: ignore[import-untyped]
+        import sqlalchemy as sa
 
         if not any(self._buffers.values()):
             return
@@ -575,12 +577,10 @@ class DatabaseSink:
 
     def read_pipeline_state(self) -> dict[str, Any]:
         """Read pipeline state from the ``{prefix}pipeline_state`` table."""
-        import sqlalchemy as sa  # type: ignore[import-untyped]
+        import sqlalchemy as sa
 
         t = self._tables["_pipeline_state"]
-        row = self._conn.execute(
-            sa.select(t.c.value).where(t.c.key == "state")
-        ).scalar()
+        row = self._conn.execute(sa.select(t.c.value).where(t.c.key == "state")).scalar()
         if row is None:
             return {}
         result: dict[str, Any] = json.loads(row)
@@ -588,7 +588,7 @@ class DatabaseSink:
 
     def write_pipeline_state(self, state: dict[str, Any]) -> None:
         """Persist pipeline state to the ``{prefix}pipeline_state`` table."""
-        import sqlalchemy as sa  # type: ignore[import-untyped]
+        import sqlalchemy as sa
 
         t = self._tables["_pipeline_state"]
         self._conn.execute(sa.delete(t).where(t.c.key == "state"))

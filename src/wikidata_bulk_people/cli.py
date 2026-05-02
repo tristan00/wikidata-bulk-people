@@ -28,11 +28,14 @@ def main() -> None:
         dest="if_exists",
         default="fail",
         choices=["fail", "append", "replace", "upsert"],
-        help="Action when output already exists (default: fail). "
-        "'upsert' only valid with --db.",
+        help="Action when output already exists (default: fail). 'upsert' only valid with --db.",
     )
-    people_p.add_argument("--table-prefix", default="", metavar="PREFIX",
-                          help="Prefix for database table names (only used with --db).")
+    people_p.add_argument(
+        "--table-prefix",
+        default="",
+        metavar="PREFIX",
+        help="Prefix for database table names (only used with --db).",
+    )
     people_p.add_argument(
         "--resume",
         dest="resume",

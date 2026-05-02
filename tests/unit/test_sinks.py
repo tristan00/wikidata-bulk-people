@@ -25,15 +25,25 @@ def _make_person(
     with_image: bool = False,
     with_aliases: bool = False,
 ) -> Person:
-    dob = DateValue(year=1990, month=6, day=15, calendar="gregorian", precision=11) if with_dates else None
-    dod = DateValue(year=2050, month=1, day=1, calendar="gregorian", precision=9) if with_dates else None
+    dob = (
+        DateValue(year=1990, month=6, day=15, calendar="gregorian", precision=11)
+        if with_dates
+        else None
+    )
+    dod = (
+        DateValue(year=2050, month=1, day=1, calendar="gregorian", precision=9)
+        if with_dates
+        else None
+    )
     spouses = []
     if with_spouse:
         spouses = [
             SpouseRecord(
                 qid="Q99",
                 name="Bob",
-                start_date=DateValue(year=2010, month=None, day=None, calendar="gregorian", precision=9),
+                start_date=DateValue(
+                    year=2010, month=None, day=None, calendar="gregorian", precision=9
+                ),
                 end_date=None,
                 end_cause=None,
                 is_former=False,
@@ -138,7 +148,7 @@ def test_csv_sink_null_dates(tmp_path: pathlib.Path) -> None:
         sink.write(person)
 
     rows = list(csv.DictReader((tmp_path / "people.csv").open(encoding="utf-8")))
-    assert rows[0]["dob_year"] == ""   # None serialized as empty string in CSV
+    assert rows[0]["dob_year"] == ""  # None serialized as empty string in CSV
 
 
 def test_csv_sink_alias_rows(tmp_path: pathlib.Path) -> None:
@@ -176,9 +186,8 @@ def test_csv_sink_image_rows(tmp_path: pathlib.Path) -> None:
 
 def test_csv_sink_if_exists_fail_raises(tmp_path: pathlib.Path) -> None:
     (tmp_path / "people.csv").write_text("existing\n", encoding="utf-8")
-    with pytest.raises(FileExistsError, match="people.csv"):
-        with CSVSink(tmp_path, if_exists="fail"):
-            pass
+    with pytest.raises(FileExistsError, match="people.csv"), CSVSink(tmp_path, if_exists="fail"):
+        pass
 
 
 def test_csv_sink_if_exists_replace(tmp_path: pathlib.Path) -> None:
@@ -299,9 +308,8 @@ def test_db_sink_if_exists_fail_raises(db_url: str) -> None:
     with DatabaseSink(db_url, if_exists="fail") as sink:
         sink.write(person)
 
-    with pytest.raises(ValueError, match="already exist"):
-        with DatabaseSink(db_url, if_exists="fail"):
-            pass
+    with pytest.raises(ValueError, match="already exist"), DatabaseSink(db_url, if_exists="fail"):
+        pass
 
 
 def test_db_sink_if_exists_replace(db_url: str) -> None:
@@ -378,9 +386,11 @@ def test_db_sink_append_schema_mismatch(tmp_path: pathlib.Path) -> None:
         conn.commit()
     engine.dispose()
 
-    with pytest.raises(ValueError, match="Schema mismatch"):
-        with DatabaseSink(db_url, if_exists="append"):
-            pass
+    with (
+        pytest.raises(ValueError, match="Schema mismatch"),
+        DatabaseSink(db_url, if_exists="append"),
+    ):
+        pass
 
 
 def test_db_sink_table_prefix(tmp_path: pathlib.Path) -> None:
