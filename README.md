@@ -4,7 +4,7 @@ Extract structured records from Wikipedia and Wikidata at scale.
 
 [![PyPI](https://img.shields.io/pypi/v/wikidata-bulk-people)](https://pypi.org/project/wikidata-bulk-people/)
 [![Python](https://img.shields.io/pypi/pyversions/wikidata-bulk-people)](https://pypi.org/project/wikidata-bulk-people/)
-[![CI](https://github.com/example/wikidata-bulk-people/actions/workflows/ci.yml/badge.svg)](https://github.com/example/wikidata-bulk-people/actions)
+[![CI](https://github.com/tristan00/wikidata-bulk-people/actions/workflows/ci.yml/badge.svg)](https://github.com/tristan00/wikidata-bulk-people/actions)
 
 ## Install
 
