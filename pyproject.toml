@@ -34,7 +34,6 @@ dev = [
     "sqlalchemy>=2.0",
     "pytest-cov>=5.0",
     "mypy>=1.10",
-    "ruff>=0.5",
     "build>=1.2",
     "twine>=5.0",
     "types-requests",
@@ -74,15 +73,3 @@ exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedE
 [tool.mypy]
 strict = true
 python_version = "3.13"
-
-[tool.ruff]
-src = ["src"]
-target-version = "py313"
-line-length = 100
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
-ignore = ["UP017", "UP042", "UP043"]  # require Python 3.11+ / 3.13+; we support >=3.10
-
-[tool.ruff.lint.per-file-ignores]
-"src/wikidata_bulk_people/enums.py" = ["E501"]  # auto-generated; some QID names are very long
