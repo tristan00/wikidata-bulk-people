@@ -22,6 +22,39 @@ def main() -> None:
     people_p.add_argument("--born-before", type=int, metavar="YEAR")
     people_p.add_argument("--occupation", metavar="QID", help="Filter by occupation QID.")
     people_p.add_argument("--citizenship", metavar="QID", help="Filter by citizenship QID.")
+    people_p.add_argument("--gender", metavar="QID", help="Filter by gender QID.")
+    people_p.add_argument("--religion", metavar="QID", help="Filter by religion QID.")
+    people_p.add_argument("--award", metavar="QID", help="Filter by award QID.")
+    people_p.add_argument(
+        "--political-ideology", metavar="QID", help="Filter by political ideology QID."
+    )
+    people_p.add_argument(
+        "--has-wikipedia-article",
+        dest="has_wikipedia_article",
+        action="store_true",
+        default=True,
+        help="Require an English Wikipedia article (default).",
+    )
+    people_p.add_argument(
+        "--no-wikipedia-article",
+        dest="has_wikipedia_article",
+        action="store_false",
+        help="Do not require a Wikipedia article.",
+    )
+    living_group = people_p.add_mutually_exclusive_group()
+    living_group.add_argument(
+        "--living",
+        dest="living",
+        action="store_true",
+        default=None,
+        help="Only include living people.",
+    )
+    living_group.add_argument(
+        "--deceased",
+        dest="living",
+        action="store_false",
+        help="Only include deceased people.",
+    )
     people_p.add_argument("--limit", type=int, metavar="N", help="Stop after N records.")
     people_p.add_argument(
         "--if-exists",
@@ -48,6 +81,17 @@ def main() -> None:
         dest="resume",
         action="store_false",
         help="Start fresh, ignoring any state file.",
+    )
+    people_p.add_argument(
+        "--year-partition",
+        dest="year_partition",
+        action="store_true",
+        default=False,
+        help=(
+            "Iterate year-by-year (-3000 to 2030 + no-DOB bucket) instead of a single "
+            "unlimited stream. Avoids WDQS throttling for large queries. "
+            "born-after and born-before are ignored when this flag is set."
+        ),
     )
 
     # wikidata-bulk-people person
@@ -114,6 +158,13 @@ def main() -> None:
             born_before=args.born_before,
             occupation_qid=args.occupation,
             citizenship_qid=args.citizenship,
+            gender_qid=args.gender,
+            religion_qid=args.religion,
+            award_qid=args.award,
+            political_ideology_qid=args.political_ideology,
+            has_wikipedia_article=args.has_wikipedia_article,
+            living=args.living,
+            year_partition=args.year_partition,
         )
 
         # Validate --upsert only with --db

@@ -410,15 +410,15 @@ def test_db_sink_table_prefix(tmp_path: pathlib.Path) -> None:
 
 def test_db_sink_pipeline_state(db_url: str) -> None:
     """DatabaseSink correctly implements StatefulSink for state persistence."""
-    state = {"completed_partitions": [1990, 1991], "in_progress": None}
+    state = {"completed": False, "last_qid": "Q1234"}
     sink = DatabaseSink(db_url)
     with sink:
         assert sink.read_pipeline_state() == {}
         sink.write_pipeline_state(state)
         assert sink.read_pipeline_state() == state
         # Overwrite
-        sink.write_pipeline_state({"completed_partitions": [1990], "in_progress": None})
-        assert sink.read_pipeline_state()["completed_partitions"] == [1990]
+        sink.write_pipeline_state({"completed": True, "last_qid": None})
+        assert sink.read_pipeline_state()["completed"] is True
 
 
 def test_db_sink_missing_sqlalchemy(monkeypatch: pytest.MonkeyPatch) -> None:

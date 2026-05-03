@@ -17,10 +17,6 @@ pytest tests/unit/test_claim_parsing.py::test_function_name
 # Run tests with coverage (must hit ≥90%)
 pytest --cov=wikidata_bulk_people --cov-report=xml
 
-# Lint and format
-ruff check src/ tests/
-ruff format src/ tests/
-
 # Type check
 mypy --strict src/wikidata_bulk_people
 
@@ -62,4 +58,18 @@ The library extracts structured `Person` records from Wikidata + Wikipedia. Ther
 - Birth-year partitioning avoids SPARQL timeouts on the full ~10M-person dataset.
 - `PeopleFilter` fields accept either enum values or raw QID strings.
 - `mypy --strict` must pass; the `[tool.mypy]` `python_version = "3.10"` target means no `3.11+`-only syntax.
-- `ruff` enforces `line-length = 100` and rules `E, F, I, UP, B, SIM`.
+- `mypy --strict` is the only required static check; ruff has been removed from this project.
+
+## Live-WDQS explore script design rules
+
+These apply when writing `scripts/explore_s*.py` scripts that hit the live Wikidata endpoint:
+
+1. **Each script uses a unique filter** — never reuse the same filter (e.g. Monaco) across more than 2-3 scripts. WDQS throttles per-IP per-filter within a rolling window. If 6 scripts all query Monaco in sequence, every script after the 3rd will get throttled empty results.
+
+2. **Resume test: expected tail is IRI-order, not position-order** — `FILTER(?item > wd:Qxxx)` filters by IRI lexicographic string comparison, NOT by position in the original WDQS result. The correct expected tail is `{q for q in all_qids if q > midpoint_qid}` (Python string `>` comparison), NOT `all_qids[10:]`.
+
+3. **Don't manufacture PASS for a test that returned wrong results** — If a live test returns 0 of 223 expected items, that is not a PASS, even if the state file says `completed=True`. Either fix the test design so it's robust, or mark it SKIP with an honest explanation. Adding a "NOTE: WDQS throttling" and returning PASS is not acceptable.
+
+4. **Reuse data across scripts where possible** — If s07 already ran Monaco to CSV, s10 can read that CSV to get all_qids instead of running a fresh WDQS query.
+
+5. **Prefer the simplest assertion that's still meaningful** — A resume test doesn't need to verify exact QID sets. Verifying "state is completed, no crash, midpoint QID not in resumed results (off-by-one check)" is sufficient as a live test. Exact QID matching belongs in unit tests.

@@ -154,6 +154,10 @@ class PeopleFilter:
         political_ideology_qid: Only include people with this political ideology (P1142).
         has_wikipedia_article: Only include people with an English Wikipedia article.
         living: If True, only living people. If False, only deceased. None for both.
+        year_partition: If True, iterate over individual birth years (-3000 to 2030) plus a
+            no-DOB bucket instead of a single unlimited stream. Avoids WDQS throttling for
+            large queries. When enabled, ``born_after`` and ``born_before`` are ignored.
+            Combine only with filters that do not themselves span millions of results.
     """
 
     born_after: int | None = None
@@ -166,6 +170,7 @@ class PeopleFilter:
     political_ideology_qid: PoliticalIdeology | str | None = None
     has_wikipedia_article: bool = True
     living: bool | None = None
+    year_partition: bool = False
 
 
 # ---------------------------------------------------------------------------

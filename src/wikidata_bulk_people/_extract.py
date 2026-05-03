@@ -51,8 +51,8 @@ class StateFile:
     The state schema is::
 
         {
-          "completed_partitions": [year_or_null, ...],
-          "in_progress": {"partition": year_or_null, "last_qid": "Q12345"}
+          "completed": false,
+          "last_qid": "Q12345"
         }
 
     Writes use a temp file + atomic rename so a crash between write and rename
@@ -63,8 +63,8 @@ class StateFile:
     """
 
     _DEFAULT: dict[str, Any] = {
-        "completed_partitions": [],
-        "in_progress": None,
+        "completed": False,
+        "last_qid": None,
     }
 
     def __init__(self, path: pathlib.Path) -> None:
@@ -91,20 +91,19 @@ class StateFile:
         self._tmp.write_text(json.dumps(state, indent=2, default=str), encoding="utf-8")
         self._tmp.replace(self._path)
 
-    def mark_completed(self, partition: int | None) -> None:
-        """Mark a partition as completed and clear in_progress."""
+    def mark_completed(self) -> None:
+        """Mark the run as completed."""
         state = self.read()
-        completed: list[int | None] = state.get("completed_partitions", [])
-        if partition not in completed:
-            completed.append(partition)
-        state["completed_partitions"] = completed
-        state["in_progress"] = None
+        state["completed"] = True
+        state["last_qid"] = None
         self.write(state)
 
-    def set_in_progress(self, partition: int | None, last_qid: str) -> None:
-        """Update the in-progress cursor for the current partition."""
+    def set_in_progress(self, last_qid: str, yp_year: int | str | None = None) -> None:
+        """Update the keyset cursor, and optionally the year-partition bucket."""
         state = self.read()
-        state["in_progress"] = {"partition": partition, "last_qid": last_qid}
+        state["last_qid"] = last_qid
+        if yp_year is not None:
+            state["yp_year"] = yp_year
         self.write(state)
 
 
@@ -187,22 +186,22 @@ class _NullState:
     """No-op state manager used when resume=False and no state_path is given."""
 
     def read(self) -> dict[str, Any]:
-        return {"completed_partitions": [], "in_progress": None}
+        return {"completed": False, "last_qid": None}
 
     def write(self, state: dict[str, Any]) -> None:  # noqa: ARG002
         pass
 
-    def mark_completed(self, partition: int | None) -> None:  # noqa: ARG002
+    def mark_completed(self) -> None:
         pass
 
-    def set_in_progress(self, partition: int | None, last_qid: str) -> None:  # noqa: ARG002
+    def set_in_progress(self, last_qid: str, yp_year: int | str | None = None) -> None:  # noqa: ARG002
         pass
 
 
 class _SinkStateAdapter:
     """Adapts a :class:`StatefulSink` to the :class:`StateFile` interface."""
 
-    _DEFAULT: dict[str, Any] = {"completed_partitions": [], "in_progress": None}
+    _DEFAULT: dict[str, Any] = {"completed": False, "last_qid": None}
 
     def __init__(self, sink: StatefulSink) -> None:
         self._sink = sink
@@ -214,18 +213,17 @@ class _SinkStateAdapter:
     def write(self, state: dict[str, Any]) -> None:
         self._sink.write_pipeline_state(state)
 
-    def mark_completed(self, partition: int | None) -> None:
+    def mark_completed(self) -> None:
         state = self.read()
-        completed: list[int | None] = state.get("completed_partitions", [])
-        if partition not in completed:
-            completed.append(partition)
-        state["completed_partitions"] = completed
-        state["in_progress"] = None
+        state["completed"] = True
+        state["last_qid"] = None
         self.write(state)
 
-    def set_in_progress(self, partition: int | None, last_qid: str) -> None:
+    def set_in_progress(self, last_qid: str, yp_year: int | str | None = None) -> None:
         state = self.read()
-        state["in_progress"] = {"partition": partition, "last_qid": last_qid}
+        state["last_qid"] = last_qid
+        if yp_year is not None:
+            state["yp_year"] = yp_year
         self.write(state)
 
 
@@ -233,58 +231,24 @@ class _SinkStateAdapter:
 # SPARQL query builder
 # ---------------------------------------------------------------------------
 
-# Birth-year range covered by birth-year partitions.
-# Years outside this range are captured in the no-DOB bucket (partition_year=None).
-_MIN_YEAR = -3000
-_MAX_YEAR = 2030
-
-# Step size for birth-year partitions (one year per partition for fine granularity).
-_YEAR_STEP = 1
-
 # Page size for keyset-paginated SPARQL queries.
 _PAGE_SIZE = 500
 
 
-def _qid_int(qid: str) -> int:
-    """Return the numeric part of a QID string, e.g. "Q937" → 937."""
-    return int(qid.lstrip("Q"))
-
-
-def _year_partitions(filter: PeopleFilter) -> list[int | None]:  # noqa: A002
-    """Return the list of birth-year partitions for *filter*, plus the no-DOB bucket.
-
-    Each year in the range is one partition. The no-DOB bucket is always appended
-    last so it can be independently resumed.
-
-    Args:
-        filter: A :class:`PeopleFilter` instance.
-
-    Returns:
-        List of integer years plus ``None`` for the no-DOB bucket.
-    """
-    start = filter.born_after if filter.born_after is not None else _MIN_YEAR
-    end = filter.born_before if filter.born_before is not None else _MAX_YEAR
-    years: list[int | None] = list(range(start, end + 1, _YEAR_STEP))
-    years.append(None)  # no-DOB bucket always included
-    return years
-
-
 def _build_query(
     filter: PeopleFilter,  # noqa: A002
-    partition_year: int | None,
     last_qid: str | None,
 ) -> str:
-    """Build a keyset-paginated WDQS SPARQL query for a single partition.
+    """Build a keyset-paginated WDQS SPARQL query.
 
     Args:
         filter: Filter parameters to apply.
-        partition_year: Birth year for this partition, or None for the no-DOB bucket.
-        last_qid: Last QID seen in this partition (keyset cursor), or None to start.
+        last_qid: Last QID seen (keyset cursor), or None to start from the beginning.
 
     Returns:
         A SPARQL query string ready to POST to the WDQS endpoint.
     """
-    constraints = _build_constraints(filter, partition_year)
+    constraints = _build_constraints(filter)
 
     cursor_clause = ""
     if last_qid:
@@ -302,18 +266,19 @@ LIMIT {_PAGE_SIZE}"""
 
 def _build_constraints(
     filter: PeopleFilter,  # noqa: A002
-    partition_year: int | None,
 ) -> list[str]:
     """Build the SPARQL WHERE clause constraint lines for a query."""
     constraints: list[str] = []
 
     constraints.append("?item wdt:P31 wd:Q5.")
 
-    if partition_year is not None:
-        year_str = str(partition_year)
-        constraints.append(f"?item wdt:P569 ?dob. FILTER(YEAR(?dob) = {year_str})")
-    else:
-        constraints.append("MINUS { ?item wdt:P569 [] }")
+    if filter.born_after is not None or filter.born_before is not None:
+        dob_clauses = ["?item wdt:P569 ?dob."]
+        if filter.born_after is not None:
+            dob_clauses.append(f"FILTER(YEAR(?dob) >= {filter.born_after})")
+        if filter.born_before is not None:
+            dob_clauses.append(f"FILTER(YEAR(?dob) <= {filter.born_before})")
+        constraints.extend(dob_clauses)
 
     if filter.occupation_qid:
         constraints.append(f"?item wdt:P106 wd:{filter.occupation_qid}.")
@@ -370,11 +335,45 @@ def _qid_from_binding(binding: dict[str, Any]) -> str | None:
     return value.rsplit("/", 1)[-1] or None
 
 
+# Year range used by year_partition mode (-3000 to 2030 inclusive, plus a sentinel for no-DOB)
+_YP_YEAR_MIN = -3000
+_YP_YEAR_MAX = 2030
+_YP_NO_DOB = "NO_DOB"  # sentinel for the no-date-of-birth bucket
+
+
+class _NoDobFilter:
+    """Wrapper to signal that the query should restrict to entities with no date-of-birth."""
+
+    def __init__(self, base: PeopleFilter) -> None:
+        self.base = base
+
+
+def _build_query_no_dob(filter: PeopleFilter, last_qid: str | None) -> str:  # noqa: A002
+    """Build a SPARQL query for the no-DOB bucket (entities lacking P569)."""
+    constraints = _build_constraints(filter)
+    # Replace any born_after/born_before constraints with a NOT EXISTS on P569
+    constraints_no_dob = [c for c in constraints if "P569" not in c]
+    constraints_no_dob.append("FILTER NOT EXISTS { ?item wdt:P569 [] }")
+
+    cursor_clause = f"FILTER(?item > wd:{last_qid})" if last_qid else ""
+    body = "\n  ".join(constraints_no_dob)
+    return f"""SELECT ?item WHERE {{
+  {body}
+  {cursor_clause}
+}}
+ORDER BY ?item
+LIMIT {_PAGE_SIZE}"""
+
+
 class QIDStream:
     """Yields Wikidata QIDs for all persons matching *filter* via keyset-paginated SPARQL.
 
-    Iterates birth-year partitions sequentially. Within each partition, pages are
-    fetched in order using a keyset cursor so queries are resumable without OFFSET.
+    Pages are fetched in order using a keyset cursor (``FILTER(?item > wd:Qxxx)``)
+    so queries are resumable without OFFSET.
+
+    When ``filter.year_partition`` is True the stream iterates over individual birth
+    years (``_YP_YEAR_MIN`` to ``_YP_YEAR_MAX``) plus a no-DOB bucket.  The
+    ``born_after`` and ``born_before`` fields of *filter* are ignored in this mode.
 
     Args:
         filter: A :class:`PeopleFilter` controlling which persons are included.
@@ -384,24 +383,37 @@ class QIDStream:
     def __init__(self, filter: PeopleFilter, user_agent: str) -> None:  # noqa: A002
         self._filter = filter
         self._sparql = _SparqlClient(user_agent=user_agent)
+        # Tracks the current year bucket during year-partitioned iteration; None otherwise.
+        self.current_year_bucket: int | str | None = None
 
     def __iter__(self) -> Generator[str]:
-        partitions = _year_partitions(self._filter)
-        for i, partition_year in enumerate(partitions):
-            label = str(partition_year) if partition_year is not None else "no-DOB"
-            logger.info(
-                "QIDStream: starting partition %s (%d/%d)",
-                label,
-                i + 1,
-                len(partitions),
-            )
-            yield from self.iter_partition(partition_year)
+        yield from self.iter_partition()
 
-    def iter_partition(self, partition_year: int | None) -> Generator[str]:
-        last_qid: str | None = None
+    def iter_partition(
+        self,
+        start_after: str | None = None,
+        start_year: int | str | None = None,
+    ) -> Generator[str]:
+        """Yield all matching QIDs, optionally resuming from a saved cursor.
+
+        Args:
+            start_after: If provided, skip all QIDs up to and including this value
+                         (keyset cursor within the current partition/year).
+            start_year: Only meaningful when ``filter.year_partition`` is True.
+                        Resume from this year bucket (inclusive).  May be an int
+                        or the string ``"NO_DOB"`` for the no-DOB bucket.
+        """
+        if self._filter.year_partition:
+            yield from self._iter_year_partitioned(start_after=start_after, start_year=start_year)
+        else:
+            yield from self._iter_single(start_after=start_after)
+
+    def _iter_single(self, start_after: str | None = None) -> Generator[str]:
+        """Single-pass keyset-paginated iteration (no year partitioning)."""
+        last_qid: str | None = start_after
         page = 0
         while True:
-            query = _build_query(self._filter, partition_year, last_qid)
+            query = _build_query(self._filter, last_qid)
             bindings = self._sparql.run_query(query)
             page += 1
             if not bindings:
@@ -412,14 +424,79 @@ class QIDStream:
                     yield qid
                     last_qid = qid
             logger.debug(
-                "QIDStream: partition=%s page=%d yielded=%d last=%s",
-                partition_year,
+                "QIDStream: page=%d yielded=%d last=%s",
                 page,
                 len(bindings),
                 last_qid,
             )
             if len(bindings) < _PAGE_SIZE:
                 break
+
+    def _iter_year_partitioned(
+        self,
+        start_after: str | None = None,
+        start_year: int | str | None = None,
+    ) -> Generator[str]:
+        """Year-by-year iteration to avoid WDQS throttling on large queries."""
+        # Build the sequence of year buckets: integers _YP_YEAR_MIN..._YP_YEAR_MAX, then NO_DOB
+        all_years: list[int | str] = list(range(_YP_YEAR_MIN, _YP_YEAR_MAX + 1)) + [_YP_NO_DOB]
+
+        # Determine where to start
+        if start_year is not None:
+            try:
+                idx = all_years.index(start_year if start_year == _YP_NO_DOB else int(start_year))
+            except ValueError:
+                idx = 0
+        else:
+            idx = 0
+
+        # Track seen QIDs to deduplicate across year buckets.
+        # A person with multiple P569 claims spanning different years would otherwise
+        # appear in each matching bucket.
+        seen: set[str] = set()
+
+        for bucket in all_years[idx:]:
+            self.current_year_bucket = bucket
+            # Build a filter for this specific year bucket
+            if bucket == _YP_NO_DOB:
+                year_filter = dataclasses.replace(self._filter, born_after=None, born_before=None)
+                # Restrict to entities with no DOB
+                bucket_filter = _NoDobFilter(year_filter)
+            else:
+                year = int(bucket)
+                bucket_filter = dataclasses.replace(  # type: ignore[assignment]
+                    self._filter, born_after=year, born_before=year,
+                    year_partition=False,  # prevent recursion
+                )
+
+            # Within each bucket, use keyset pagination; only use start_after for the first bucket
+            cursor = start_after if bucket == (start_year if start_year is not None else all_years[idx]) else None
+            last_qid: str | None = cursor
+            page = 0
+            while True:
+                if isinstance(bucket_filter, _NoDobFilter):
+                    query = _build_query_no_dob(bucket_filter.base, last_qid)
+                else:
+                    query = _build_query(bucket_filter, last_qid)
+                bindings = self._sparql.run_query(query)
+                page += 1
+                if not bindings:
+                    break
+                for binding in bindings:
+                    qid = _qid_from_binding(binding)
+                    if qid and qid not in seen:
+                        seen.add(qid)
+                        yield qid
+                        last_qid = qid
+                logger.debug(
+                    "QIDStream[year=%s]: page=%d yielded=%d last=%s",
+                    bucket,
+                    page,
+                    len(bindings),
+                    last_qid,
+                )
+                if len(bindings) < _PAGE_SIZE:
+                    break
 
 
 # ---------------------------------------------------------------------------
@@ -677,7 +754,7 @@ def iter_people_pipeline(
         user_agent: HTTP User-Agent string.
 
     Yields:
-        :class:`~wikidata_bulk_people.Person` objects in partition order.
+        :class:`~wikidata_bulk_people.Person` objects in QID ascending order.
     """
     extractor = PersonExtractor(user_agent=user_agent)
     stream = QIDStream(filter=filter, user_agent=user_agent)
@@ -708,8 +785,7 @@ def run_people_pipeline(
     Args:
         sink: Output destination; must be a context manager with a ``write`` method.
         filter: Which people to include.
-        resume: If True, skip already-completed partitions and resume from
-            the last ``in_progress`` cursor.
+        resume: If True, resume from the last saved cursor.
         user_agent: HTTP User-Agent string.
         state_path: Path for the state ``.json`` file. Required when *sink* does
             not implement :class:`StatefulSink`. Ignored when it does.
@@ -728,7 +804,6 @@ def run_people_pipeline(
         )
 
     extractor = PersonExtractor(user_agent=user_agent)
-    partitions = _year_partitions(filter)
 
     def _sigint_handler(signum: int, frame: object) -> None:  # noqa: ARG001
         logger.info("Interrupted — state saved")
@@ -742,67 +817,53 @@ def run_people_pipeline(
         with sink:
             # State must be read after sink.__enter__() so that stateful sinks
             # (e.g. DatabaseSink) have an open connection before reading.
-            state = (
-                state_mgr.read() if resume else {"completed_partitions": [], "in_progress": None}
-            )
-            completed: set[int | None] = set(state.get("completed_partitions", []))
-            in_progress: dict[str, object] | None = state.get("in_progress")
+            state = state_mgr.read() if resume else {"completed": False, "last_qid": None}
 
-            for partition_year in partitions:
-                if partition_year in completed:
-                    logger.debug("Skipping completed partition %s", partition_year)
+            if state.get("completed"):
+                logger.info("Pipeline already completed, nothing to do")
+                return
+
+            raw_last = state.get("last_qid")
+            start_after: str | None = str(raw_last) if raw_last else None
+            raw_yp_year = state.get("yp_year")
+            start_year: int | str | None = None
+            if raw_yp_year is not None:
+                start_year = _YP_NO_DOB if str(raw_yp_year) == _YP_NO_DOB else int(raw_yp_year)
+            if start_after:
+                logger.info("Resuming from QID %s (year bucket: %s)", start_after, start_year)
+
+            logger.info("Pipeline: starting")
+            last_qid: str | None = None
+            stream = QIDStream(filter=filter, user_agent=user_agent)
+
+            for qid in stream.iter_partition(start_after=start_after, start_year=start_year):
+                try:
+                    person = extractor.extract(qid)
+                except ExtractionError as exc:
+                    logger.warning("Skipping %s: %s", qid, exc)
+                    skipped += 1
                     continue
+                except TransportError:
+                    logger.error("Transport error on %s — saving state and re-raising", qid)
+                    if last_qid:
+                        state_mgr.set_in_progress(last_qid, yp_year=stream.current_year_bucket)
+                    raise
 
-                resume_from: str | None = None
-                if in_progress and in_progress.get("partition") == partition_year:
-                    resume_from = str(in_progress["last_qid"])
+                sink.write(person)
+                extracted += 1
+                last_qid = qid
+
+                if extracted % 100 == 0:
                     logger.info(
-                        "Resuming partition %s from QID %s",
-                        partition_year,
-                        resume_from,
+                        "Pipeline: extracted=%d skipped=%d last=%s",
+                        extracted,
+                        skipped,
+                        qid,
                     )
-                    in_progress = None
+                    state_mgr.set_in_progress(qid, yp_year=stream.current_year_bucket)
 
-                label = str(partition_year) if partition_year is not None else "no-DOB"
-                logger.info("Pipeline: starting partition %s", label)
-
-                last_qid: str | None = None
-                stream = QIDStream(filter=filter, user_agent=user_agent)
-
-                for qid in stream.iter_partition(partition_year):
-                    if resume_from is not None:
-                        if _qid_int(qid) <= _qid_int(resume_from):
-                            continue
-                        resume_from = None
-
-                    try:
-                        person = extractor.extract(qid)
-                    except ExtractionError as exc:
-                        logger.warning("Skipping %s: %s", qid, exc)
-                        skipped += 1
-                        continue
-                    except TransportError:
-                        logger.error("Transport error on %s — saving state and re-raising", qid)
-                        if last_qid:
-                            state_mgr.set_in_progress(partition_year, last_qid)
-                        raise
-
-                    sink.write(person)
-                    extracted += 1
-                    last_qid = qid
-
-                    if extracted % 100 == 0:
-                        logger.info(
-                            "Pipeline: extracted=%d skipped=%d partition=%s last=%s",
-                            extracted,
-                            skipped,
-                            label,
-                            qid,
-                        )
-                        state_mgr.set_in_progress(partition_year, qid)
-
-                state_mgr.mark_completed(partition_year)
-                logger.info("Pipeline: completed partition %s", label)
+            state_mgr.mark_completed()
+            logger.info("Pipeline: completed")
 
     finally:
         signal.signal(signal.SIGINT, old_handler)
