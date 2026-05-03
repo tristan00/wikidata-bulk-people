@@ -229,13 +229,17 @@ the birth-year range). Birth-year sub-partitioning is available today as the
 `year_partition=True` flag on `PeopleFilter` (and `--year-partition` on the CLI),
 but has not been validated beyond the first two pages.
 
-**Possible future: remove `ORDER BY` from SPARQL queries** — The keyset cursor
-(`FILTER(?item > wd:Qxxx)`) technically only requires consistent ordering within a page,
-not across all pages. Removing `ORDER BY` would allow WDQS to use a more efficient query
-plan and may significantly reduce per-page latency for large result sets. In practice WDQS
-returns results in an order that is neither strictly numeric nor lexicographic, but is likely
-stable enough for cursor-based pagination. A future version should experiment with
-`ORDER BY`-free queries to measure the trade-off between speed and ordering guarantees.
+**Unordered mode (`ordered=False` / `--unordered`)** — Drops `ORDER BY ?item` from
+the SPARQL query so WDQS can use a faster query plan and is less likely to silently
+drop pages on complex filters. The keyset cursor (`FILTER(?item > wd:Qxxx)`) is kept,
+and the iterator advances it to the **lex-max** QID of each returned page. The trade-off:
+any matching QIDs that lie below the page's lex-max but were not returned in that page
+are skipped permanently. In practice this skip rate is small on tightly-bounded filters,
+and the throughput win on large queries is significant. Default remains `ordered=True`
+(exhaustive, slower, more vulnerable to throttling). The integration tests in
+`tests/integration/test_live.py` measure the empirical skip rate — run them with
+`pytest -m integration` against your filter of interest before relying on unordered mode
+for production extracts.
 
 ## License
 

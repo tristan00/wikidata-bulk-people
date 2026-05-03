@@ -93,6 +93,17 @@ def main() -> None:
             "born-after and born-before are ignored when this flag is set."
         ),
     )
+    people_p.add_argument(
+        "--unordered",
+        dest="ordered",
+        action="store_false",
+        default=True,
+        help=(
+            "Drop ORDER BY ?item from SPARQL queries for higher throughput on large "
+            "result sets. May skip a small fraction of QIDs that fall below the "
+            "page lex-max but were not returned by WDQS. See PeopleFilter.ordered."
+        ),
+    )
 
     # wikidata-bulk-people person
     person_p = sub.add_parser("person", help="Extract a single person by QID or Wikipedia title.")
@@ -165,6 +176,7 @@ def main() -> None:
             has_wikipedia_article=args.has_wikipedia_article,
             living=args.living,
             year_partition=args.year_partition,
+            ordered=args.ordered,
         )
 
         # Validate --upsert only with --db

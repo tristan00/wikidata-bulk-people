@@ -4,7 +4,7 @@ import pathlib
 from collections.abc import Generator
 from typing import Literal
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from wikidata_bulk_people._models import (
     DateValue,

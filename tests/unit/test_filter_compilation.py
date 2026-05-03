@@ -1,6 +1,6 @@
 """Unit tests for PeopleFilter → SPARQL query compilation."""
 
-from wikidata_bulk_people._extract import _build_query
+from wikidata_bulk_people._extract import _build_query, _build_query_no_dob
 from wikidata_bulk_people._models import PeopleFilter
 
 
@@ -59,3 +59,29 @@ class TestBuildQuery:
     def test_living_filter_true(self) -> None:
         q = _build_query(PeopleFilter(living=True), last_qid=None)
         assert "P570" in q  # living=True should exclude those with P570
+
+    def test_ordered_default_includes_order_by(self) -> None:
+        q = _build_query(PeopleFilter(), last_qid=None)
+        assert "ORDER BY ?item" in q
+
+    def test_unordered_omits_order_by(self) -> None:
+        q = _build_query(PeopleFilter(ordered=False), last_qid=None)
+        assert "ORDER BY" not in q
+        # Cursor and LIMIT must still work
+        assert "LIMIT" in q
+
+    def test_unordered_keeps_keyset_cursor(self) -> None:
+        q = _build_query(PeopleFilter(ordered=False), last_qid="Q1000")
+        assert "ORDER BY" not in q
+        assert "FILTER(?item > wd:Q1000)" in q
+
+    def test_no_dob_query_default_includes_order_by(self) -> None:
+        q = _build_query_no_dob(PeopleFilter(), last_qid=None)
+        assert "ORDER BY ?item" in q
+        assert "FILTER NOT EXISTS { ?item wdt:P569 [] }" in q
+
+    def test_no_dob_query_unordered_omits_order_by(self) -> None:
+        q = _build_query_no_dob(PeopleFilter(ordered=False), last_qid="Q500")
+        assert "ORDER BY" not in q
+        assert "FILTER(?item > wd:Q500)" in q
+        assert "FILTER NOT EXISTS { ?item wdt:P569 [] }" in q
