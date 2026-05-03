@@ -156,7 +156,7 @@ class TestPeopleFilterAcceptsEnums:
             citizenship_qid=Country.UNITED_STATES,
             gender_qid=Gender.FEMALE,
         )
-        q = _build_query(f, partition_year=1900, last_qid=None)
+        q = _build_query(f, last_qid=None)
         assert "wd:Q169470" in q, "Physicist QID missing from SPARQL"
         assert "wd:Q30" in q, "US QID missing from SPARQL"
         assert "wd:Q6581072" in q, "Female QID missing from SPARQL"
@@ -171,6 +171,6 @@ class TestPeopleFilterAcceptsEnums:
             religion_qid=Religion.ISLAM,
             political_ideology_qid=PoliticalIdeology.SOCIALISM,
         )
-        q = _build_query(f, partition_year=1900, last_qid=None)
+        q = _build_query(f, last_qid=None)
         assert "wdt:P140" in q, "P140 (religion) missing from SPARQL"
         assert "wdt:P1142" in q, "P1142 (political ideology) missing from SPARQL"
