@@ -241,6 +241,11 @@ def _build_query(
 ) -> str:
     """Build a keyset-paginated WDQS SPARQL query.
 
+    The ``ORDER BY ?item`` clause is included only when ``filter.ordered`` is True
+    (the default). With ordering disabled, WDQS returns each page faster and is
+    less likely to silently drop pages, but the cursor may skip QIDs that lie
+    below the page's lex-max — see :class:`PeopleFilter` for details.
+
     Args:
         filter: Filter parameters to apply.
         last_qid: Last QID seen (keyset cursor), or None to start from the beginning.
@@ -255,13 +260,12 @@ def _build_query(
         cursor_clause = f"FILTER(?item > wd:{last_qid})"
 
     body = "\n  ".join(constraints)
-    query = f"""SELECT ?item WHERE {{
+    order_clause = "ORDER BY ?item\n" if filter.ordered else ""
+    return f"""SELECT ?item WHERE {{
   {body}
   {cursor_clause}
 }}
-ORDER BY ?item
-LIMIT {_PAGE_SIZE}"""
-    return query
+{order_clause}LIMIT {_PAGE_SIZE}"""
 
 
 def _build_constraints(
@@ -349,7 +353,10 @@ class _NoDobFilter:
 
 
 def _build_query_no_dob(filter: PeopleFilter, last_qid: str | None) -> str:  # noqa: A002
-    """Build a SPARQL query for the no-DOB bucket (entities lacking P569)."""
+    """Build a SPARQL query for the no-DOB bucket (entities lacking P569).
+
+    Honors ``filter.ordered`` the same way :func:`_build_query` does.
+    """
     constraints = _build_constraints(filter)
     # Replace any born_after/born_before constraints with a NOT EXISTS on P569
     constraints_no_dob = [c for c in constraints if "P569" not in c]
@@ -357,12 +364,12 @@ def _build_query_no_dob(filter: PeopleFilter, last_qid: str | None) -> str:  # n
 
     cursor_clause = f"FILTER(?item > wd:{last_qid})" if last_qid else ""
     body = "\n  ".join(constraints_no_dob)
+    order_clause = "ORDER BY ?item\n" if filter.ordered else ""
     return f"""SELECT ?item WHERE {{
   {body}
   {cursor_clause}
 }}
-ORDER BY ?item
-LIMIT {_PAGE_SIZE}"""
+{order_clause}LIMIT {_PAGE_SIZE}"""
 
 
 class QIDStream:
@@ -409,25 +416,37 @@ class QIDStream:
             yield from self._iter_single(start_after=start_after)
 
     def _iter_single(self, start_after: str | None = None) -> Generator[str]:
-        """Single-pass keyset-paginated iteration (no year partitioning)."""
+        """Single-pass keyset-paginated iteration (no year partitioning).
+
+        In ordered mode the cursor advances monotonically (last yielded == page max).
+        In unordered mode the cursor is the lex-max QID of the page (IRI string
+        ordering, matching SPARQL ``?item > wd:Qxxx`` semantics).
+        """
         last_qid: str | None = start_after
         page = 0
+        ordered = self._filter.ordered
         while True:
             query = _build_query(self._filter, last_qid)
             bindings = self._sparql.run_query(query)
             page += 1
             if not bindings:
                 break
+            page_qids: list[str] = []
             for binding in bindings:
                 qid = _qid_from_binding(binding)
                 if qid:
                     yield qid
-                    last_qid = qid
+                    page_qids.append(qid)
+                    if ordered:
+                        last_qid = qid
+            if not ordered and page_qids:
+                last_qid = max(page_qids)
             logger.debug(
-                "QIDStream: page=%d yielded=%d last=%s",
+                "QIDStream: page=%d yielded=%d last=%s ordered=%s",
                 page,
                 len(bindings),
                 last_qid,
+                ordered,
             )
             if len(bindings) < _PAGE_SIZE:
                 break
@@ -473,6 +492,8 @@ class QIDStream:
             cursor = start_after if bucket == (start_year if start_year is not None else all_years[idx]) else None
             last_qid: str | None = cursor
             page = 0
+            base_for_ordered = bucket_filter.base if isinstance(bucket_filter, _NoDobFilter) else bucket_filter
+            ordered = base_for_ordered.ordered
             while True:
                 if isinstance(bucket_filter, _NoDobFilter):
                     query = _build_query_no_dob(bucket_filter.base, last_qid)
@@ -482,18 +503,27 @@ class QIDStream:
                 page += 1
                 if not bindings:
                     break
+                page_qids: list[str] = []
                 for binding in bindings:
                     qid = _qid_from_binding(binding)
-                    if qid and qid not in seen:
-                        seen.add(qid)
-                        yield qid
+                    if not qid:
+                        continue
+                    page_qids.append(qid)
+                    if qid in seen:
+                        continue
+                    seen.add(qid)
+                    yield qid
+                    if ordered:
                         last_qid = qid
+                if not ordered and page_qids:
+                    last_qid = max(page_qids)
                 logger.debug(
-                    "QIDStream[year=%s]: page=%d yielded=%d last=%s",
+                    "QIDStream[year=%s]: page=%d yielded=%d last=%s ordered=%s",
                     bucket,
                     page,
                     len(bindings),
                     last_qid,
+                    ordered,
                 )
                 if len(bindings) < _PAGE_SIZE:
                     break

@@ -158,6 +158,13 @@ class PeopleFilter:
             no-DOB bucket instead of a single unlimited stream. Avoids WDQS throttling for
             large queries. When enabled, ``born_after`` and ``born_before`` are ignored.
             Combine only with filters that do not themselves span millions of results.
+        ordered: If True (default), the SPARQL query uses ``ORDER BY ?item`` so keyset
+            pagination is exhaustive. If False, the ``ORDER BY`` is dropped and the
+            cursor advances to the lex-max QID of each page. This trades exhaustiveness
+            for throughput: WDQS returns each page faster and is much less likely to
+            silently drop results past the first page, but a small fraction of matching
+            QIDs may be skipped (any QID lexicographically less than the page's lex-max
+            that WDQS happened not to return in the page is lost).
     """
 
     born_after: int | None = None
@@ -171,6 +178,7 @@ class PeopleFilter:
     has_wikipedia_article: bool = True
     living: bool | None = None
     year_partition: bool = False
+    ordered: bool = True
 
 
 # ---------------------------------------------------------------------------
