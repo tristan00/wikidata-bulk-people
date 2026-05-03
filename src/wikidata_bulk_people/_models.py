@@ -13,7 +13,7 @@ from wikidata_bulk_people.enums import (
 )
 
 # Keep in sync with __version__ in __init__.py
-_VERSION: str = "0.1.0"
+_VERSION: str = "0.1.1"
 
 
 @dataclass
