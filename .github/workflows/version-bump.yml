@@ -1,0 +1,88 @@
+name: Version bump
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  bump:
+    # Skip PRs from forks — GITHUB_TOKEN can't push back to fork branches.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip if last commit is the bump itself
+        id: loop_check
+        run: |
+          last_msg=$(git log -1 --pretty=%s)
+          if [[ "$last_msg" == *"[skip version]"* ]]; then
+            echo "Last commit is a bump — skipping to avoid loop."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip if PR already differs from main
+        if: steps.loop_check.outputs.skip != 'true'
+        id: drift_check
+        run: |
+          git fetch origin main --depth=1
+          pr_version=$(grep -E '^__version__' src/wikidata_bulk_people/__init__.py | cut -d'"' -f2)
+          main_version=$(git show origin/main:src/wikidata_bulk_people/__init__.py | grep -E '^__version__' | cut -d'"' -f2)
+          echo "PR version: $pr_version  main version: $main_version"
+          if [[ "$pr_version" != "$main_version" ]]; then
+            echo "Version already bumped in this PR — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine bump segment from PR labels
+        if: steps.loop_check.outputs.skip != 'true' && steps.drift_check.outputs.skip != 'true'
+        id: segment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          labels=$(gh pr view ${{ github.event.pull_request.number }} --json labels --jq '.labels[].name')
+          echo "Labels: $labels"
+          if echo "$labels" | grep -q '^version:major$'; then
+            echo "value=major" >> "$GITHUB_OUTPUT"
+          elif echo "$labels" | grep -q '^version:minor$'; then
+            echo "value=minor" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=patch" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.loop_check.outputs.skip != 'true' && steps.drift_check.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Run bump script
+        if: steps.loop_check.outputs.skip != 'true' && steps.drift_check.outputs.skip != 'true'
+        id: bump
+        run: |
+          new_version=$(python scripts/bump_version.py ${{ steps.segment.outputs.value }})
+          echo "New version: $new_version"
+          echo "version=$new_version" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push bump
+        if: steps.loop_check.outputs.skip != 'true' && steps.drift_check.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/wikidata_bulk_people/__init__.py src/wikidata_bulk_people/_models.py
+          git commit -m "chore: bump version to ${{ steps.bump.outputs.version }} [skip version]"
+          git push origin HEAD:${{ github.event.pull_request.head.ref }}
