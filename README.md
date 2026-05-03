@@ -200,12 +200,31 @@ Each `Person` object contains the following fields:
 
 ## Architecture
 
-The library queries the [Wikidata SPARQL endpoint](https://query.wikidata.org/) in birth-year
-partitions to avoid timeouts on the full ~10 M person dataset. Each partition is fetched via
-keyset pagination (`FILTER(?item > wd:Qxxx)`) so interrupted runs resume from the last cursor.
-Four HTTP clients handle Wikidata entities, Wikipedia article extracts, Wikimedia Commons image
-metadata, and rendered HTML respectively — all with per-host throttling and exponential-backoff
-retries.
+The library queries the [Wikidata SPARQL endpoint](https://query.wikidata.org/) using a single
+keyset-paginated stream (`FILTER(?item > wd:Qxxx) ORDER BY ?item LIMIT 500`) so interrupted
+runs resume from the last cursor. Four HTTP clients handle Wikidata entities, Wikipedia article
+extracts, Wikimedia Commons image metadata, and rendered HTML respectively — all with per-host
+throttling and exponential-backoff retries.
+
+## Known issues and future work
+
+**WDQS pagination throttling on complex filtered queries** — When multiple filters are combined
+(e.g. `occupation_qid` + `has_wikipedia_article=True`), the WDQS endpoint may silently return
+an empty result set after the first 500-item page instead of returning a timeout error. The
+keyset pagination logic in `QIDStream` is correct; the second page cursor is issued, but
+WDQS silently drops the response under load. For queries that are known to span more than 500
+results, the practical workaround is to split the request into narrower filters (e.g. narrow
+the birth-year range). Birth-year sub-partitioning is available today as the
+`year_partition=True` flag on `PeopleFilter` (and `--year-partition` on the CLI),
+but has not been validated beyond the first two pages.
+
+**Possible future: remove `ORDER BY` from SPARQL queries** — The keyset cursor
+(`FILTER(?item > wd:Qxxx)`) technically only requires consistent ordering within a page,
+not across all pages. Removing `ORDER BY` would allow WDQS to use a more efficient query
+plan and may significantly reduce per-page latency for large result sets. In practice WDQS
+returns results in an order that is neither strictly numeric nor lexicographic, but is likely
+stable enough for cursor-based pagination. A future version should experiment with
+`ORDER BY`-free queries to measure the trade-off between speed and ordering guarantees.
 
 ## License
 

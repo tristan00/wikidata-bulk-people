@@ -19,3 +19,7 @@ htmlcov/
 *.log
 .DS_Store
 .idea/
+scripts/explore_s*.py
+/tmp/wbp_explore/
+detectives_csv/
+nihilism_csv/
