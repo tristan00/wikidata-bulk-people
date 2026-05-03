@@ -25,6 +25,10 @@ print(einstein.name, einstein.date_of_birth)
 # Iterate over matching people (streaming, no disk I/O):
 for person in iter_people(filter=PeopleFilter(occupation_qid=Occupation.WRITER, born_after=1900)):
     print(person.name, person.date_of_birth)
+
+# For large queries (>500 results), use year_partition to avoid WDQS throttling:
+for person in iter_people(filter=PeopleFilter(occupation_qid=Occupation.PHYSICIST, year_partition=True)):
+    print(person.name)
 ```
 
 ## Output formats
@@ -125,7 +129,7 @@ Loads all results into a `list[Person]`. For very large result sets prefer
 wikidata-bulk-people person Q937
 
 # Bulk — JSONL
-wikidata-bulk-people people --out writers.jsonl --born-after 1900
+wikidata-bulk-people people --out writers.jsonl --occupation Q36180 --born-after 1900
 
 # Bulk — CSV
 wikidata-bulk-people people --csv-dir writers_csv/ --born-after 1900
@@ -140,9 +144,16 @@ wikidata-bulk-people people \
   --if-exists upsert \
   --born-after 1900
 
-wikidata-bulk-people version
+# Year-partition mode — avoids WDQS throttling for large queries (>500 results)
+wikidata-bulk-people people --out physicists.jsonl --occupation Q169470 --year-partition
 
+wikidata-bulk-people version
 ```
+
+Filter flags for `people`: `--occupation QID`, `--citizenship QID`, `--gender QID`,
+`--religion QID`, `--award QID`, `--political-ideology QID`, `--born-after YEAR`,
+`--born-before YEAR`, `--living`, `--deceased`, `--no-wikipedia-article`,
+`--year-partition`.
 
 ## Data reference
 
