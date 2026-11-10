@@ -183,6 +183,45 @@ def test_long_batches_use_read_only_post():
     with patch.object(client._session, "post", return_value=Response({"ok": 1})) as post, patch.object(_throttle, "wait"):
         assert client._get("https://example.org", {"titles": "A" * 8000}) == {"ok": 1}
         assert post.call_count == 1
+        assert post.call_args.kwargs["headers"] == {"Promise-Non-Write-API-Action": "true"}
+
+
+@pytest.mark.parametrize("retry_after", [None, "0", "1", "9"])
+def test_maxlag_observes_minimum_wait_and_keeps_cooldown_on_exhaustion(retry_after):
+    client = BaseClient("test")
+    headers = {} if retry_after is None else {"Retry-After": retry_after}
+    response = Response({"error": {"code": "maxlag"}}, headers=headers)
+    with patch.object(client._session, "get", return_value=response), \
+         patch.object(_throttle, "wait"), patch.object(_throttle, "defer") as defer:
+        with pytest.raises(TransportError, match="maxlag"):
+            client._get("https://www.wikidata.org/w/api.php")
+    assert defer.call_count == 5
+    assert all(c.args[1] >= max(5, int(retry_after or 0)) for c in defer.call_args_list)
+    client.close()
+
+
+@pytest.mark.parametrize("interactive", [False, True])
+def test_foreground_policy_applies_to_every_action_api_read(interactive):
+    from wikidata_bulk_people import extract_person
+    requests_seen = []
+    with FixtureAPI() as api:
+        api.failure = lambda url, params: requests_seen.append((url, dict(params)))
+        person = extract_person("Q937", interactive=interactive)
+    assert person.qid == "Q937"
+    api_params = [p for url, p in requests_seen if url.endswith("/w/api.php")]
+    assert api_params
+    assert all(("maxlag" not in p) if interactive else p.get("maxlag") == "5" for p in api_params)
+
+
+def test_foreground_mode_still_respects_rate_limits():
+    client = BaseClient("test", interactive=True)
+    with patch.object(client._session, "get", side_effect=[
+        Response(status=429, headers={"Retry-After": "7"}), Response({"ok": True})]), \
+         patch.object(_throttle, "wait") as wait, patch.object(_throttle, "defer") as defer:
+        assert client._api_get("https://www.wikidata.org/w/api.php", {"action": "query"}) == {"ok": True}
+    assert ("wikimedia-api", 0.3) in [c.args for c in wait.call_args_list]
+    assert ("wikimedia-api", 7) in [c.args for c in defer.call_args_list]
+    client.close()
 
 
 def test_rest_json_error_response_is_not_cached_as_empty_alts():

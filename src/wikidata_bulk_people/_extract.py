@@ -54,7 +54,7 @@ _FILE_PREFIX_RE = re.compile(r"^File:", re.IGNORECASE)
 class PersonExtractor:
 
     def __init__(self, user_agent: str, cache: ObjectCache | None = None,
-                 workers: int = 4) -> None:
+                 workers: int = 4, *, interactive: bool = False) -> None:
         self._user_agent = user_agent
         self._workers = workers
         self._pool = ThreadPoolExecutor(max_workers=workers)
@@ -67,9 +67,9 @@ class PersonExtractor:
         self._batch_pages: dict[str, Any] | None = None
         self._batch_infos: dict[str, Any] | None = None
         self._batch_alts: dict[str, dict[str, str]] | None = None
-        self._wd = WikidataClient(user_agent=user_agent, cache=self._cache)
-        self._wp = WikipediaClient(user_agent=user_agent, cache=self._cache)
-        self._commons = CommonsClient(user_agent=user_agent, cache=self._cache)
+        self._wd = WikidataClient(user_agent=user_agent, cache=self._cache, interactive=interactive)
+        self._wp = WikipediaClient(user_agent=user_agent, cache=self._cache, interactive=interactive)
+        self._commons = CommonsClient(user_agent=user_agent, cache=self._cache, interactive=interactive)
         self._rest = RestClient(user_agent=user_agent, cache=self._cache)
 
     def close(self) -> None:

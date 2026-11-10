@@ -344,7 +344,7 @@ def _selected_articles(path: pathlib.Path) -> int:
 
 def populate(directory: pathlib.Path, articles: dict[str, Any], user_agent: str,
              acquisition: Future[dict[str, Any]] | None = None,
-             stop: Event | None = None) -> dict[str, Any]:
+             stop: Event | None = None, *, interactive: bool = False) -> dict[str, Any]:
     _check_cancelled(stop)
     try:
         import pyarrow as pa
@@ -372,7 +372,7 @@ def populate(directory: pathlib.Path, articles: dict[str, Any], user_agent: str,
         cache.close()
         return dict(progress)
     db = sqlite3.connect(directory / "entities.sqlite3")
-    commons = CommonsClient(user_agent, cache=cache)
+    commons = CommonsClient(user_agent, cache=cache, interactive=interactive)
     sparql = _SparqlClient(user_agent)
     try:
         db.execute("CREATE TABLE IF NOT EXISTS needed(qid TEXT PRIMARY KEY)")
@@ -476,7 +476,8 @@ def populate(directory: pathlib.Path, articles: dict[str, Any], user_agent: str,
                         len(articles["files"]), progress["matched_articles"])
 
 
-        progress["fallback_articles"] = _prefetch_fallbacks(db, cache, commons, user_agent, stop)
+        progress["fallback_articles"] = _prefetch_fallbacks(db, cache, commons, user_agent, stop,
+                                                          interactive=interactive)
         _check_cancelled(stop)
         progress.update(complete=True, people=db.execute("SELECT COUNT(*) FROM entities").fetchone()[0])
         cache.put_many({"snapshot:checkpoint": dict(progress)})
@@ -490,8 +491,8 @@ def populate(directory: pathlib.Path, articles: dict[str, Any], user_agent: str,
 
 
 def _prefetch_fallbacks(db: sqlite3.Connection, cache: ObjectCache, commons: CommonsClient,
-                        user_agent: str, stop: Event | None = None) -> int:
-    wikipedia = WikipediaClient(user_agent, cache=cache)
+                        user_agent: str, stop: Event | None = None, *, interactive: bool = False) -> int:
+    wikipedia = WikipediaClient(user_agent, cache=cache, interactive=interactive)
     rest = RestClient(user_agent, cache=cache)
     count = 0
     try:
@@ -522,7 +523,8 @@ def _prefetch_fallbacks(db: sqlite3.Connection, cache: ObjectCache, commons: Com
         wikipedia.close()
 
 
-def prepare(directory: pathlib.Path, filter: PeopleFilter, limit: int, user_agent: str) -> dict[str, Any]:
+def prepare(directory: pathlib.Path, filter: PeopleFilter, limit: int, user_agent: str,
+            *, interactive: bool = False) -> dict[str, Any]:
     _validate_filter(filter)
     if limit < 1:
         raise ValueError("Public snapshot acquisition requires a positive limit")
@@ -556,7 +558,8 @@ def prepare(directory: pathlib.Path, filter: PeopleFilter, limit: int, user_agen
                 while not articles.done() and not article_manifest.exists():
                     _pause(1, stop)
                 article_info = articles.result() if articles.done() else _read(article_manifest)
-                prepared = populate(directory, article_info, user_agent, articles, stop)
+                prepared = populate(directory, article_info, user_agent, articles, stop,
+                                    interactive=interactive)
                 article_info = articles.result()
             except BaseException as exc:
                 stop.set()

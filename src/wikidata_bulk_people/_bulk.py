@@ -260,7 +260,8 @@ def _run(job: JobStore, sink: Any, filter: PeopleFilter, user_agent: str,
     elif job.state["completed"]:
         return
     cache = ObjectCache(cache_path, ttl=options.cache_ttl)
-    extractor = PersonExtractor(user_agent=user_agent, cache=cache, workers=options.workers)
+    extractor = PersonExtractor(user_agent=user_agent, cache=cache, workers=options.workers,
+                                interactive=options.interactive)
     try:
         with sink:
             if isinstance(sink, DatabaseSink):
@@ -278,7 +279,8 @@ def _run(job: JobStore, sink: Any, filter: PeopleFilter, user_agent: str,
                 from wikidata_bulk_people._snapshot import SnapshotCache, iter_qids, prepare
                 source_directory = pathlib.Path(options.public_snapshot)
                 assert options.limit is not None
-                provenance = prepare(source_directory, filter, options.limit, user_agent)
+                provenance = prepare(source_directory, filter, options.limit, user_agent,
+                                     interactive=options.interactive)
                 previous_source = job.get("source_provenance")
                 if previous_source is not None and previous_source != provenance:
                     raise ValueError("Prepared source revisions changed; use a new job and destination")
@@ -286,7 +288,8 @@ def _run(job: JobStore, sink: Any, filter: PeopleFilter, user_agent: str,
                 extractor.close()
                 cache.close()
                 cache = SnapshotCache(source_directory, cache_path, options.cache_ttl)
-                extractor = PersonExtractor(user_agent=user_agent, cache=cache, workers=options.workers)
+                extractor = PersonExtractor(user_agent=user_agent, cache=cache, workers=options.workers,
+                                            interactive=options.interactive)
                 if not job.state["discovery_complete"]:
                     next_state = dict(job.state)
                     with job.db:
@@ -424,11 +427,12 @@ def iter_records(*, filter: PeopleFilter, user_agent: str,
         if live_cache is not None and (directory.resolve() == live_cache.resolve()
                                       or directory.resolve() in live_cache.resolve().parents):
             raise ValueError("The live cache must be outside the public snapshot directory")
-        prepare(directory, filter, options.limit, user_agent)
+        prepare(directory, filter, options.limit, user_agent, interactive=options.interactive)
         cache = SnapshotCache(directory, live_cache, options.cache_ttl)
     else:
         cache = ObjectCache(live_cache, ttl=options.cache_ttl)
-    extractor = PersonExtractor(user_agent, cache=cache, workers=options.workers)
+    extractor = PersonExtractor(user_agent, cache=cache, workers=options.workers,
+                                interactive=options.interactive)
     stream = QIDStream(filter, user_agent)
     if options.public_snapshot is not None:
         source_qids = iter_qids(pathlib.Path(options.public_snapshot))

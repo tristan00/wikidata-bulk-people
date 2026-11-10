@@ -21,6 +21,28 @@ from wikidata_bulk_people._sinks import CSVSink, DatabaseSink
 def read_jsonl(out):
     return [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines()]
 
+
+@pytest.mark.parametrize("mode", ["iterator", "memory", "jsonl", "csv", "db"])
+@pytest.mark.parametrize("interactive", [False, True])
+def test_bulk_request_policy_reaches_all_public_paths(tmp_path, mode, interactive):
+    options = BulkOptions(limit=2, interactive=interactive, job_path=tmp_path / "job")
+    requests_seen = []
+    with FixtureAPI(2) as api:
+        api.failure = lambda url, params: requests_seen.append((url, dict(params)))
+        if mode == "iterator":
+            assert len(list(iter_people(options=options))) == 2
+        elif mode == "memory":
+            assert len(extract_people_to_memory(options=options)) == 2
+        elif mode == "jsonl":
+            extract_people(tmp_path / "people.jsonl", options=options)
+        elif mode == "csv":
+            extract_people_to_csv(tmp_path / "csv", options=options)
+        else:
+            extract_people_to_db("sqlite:///" + (tmp_path / "people.db").as_posix(), options=options)
+    api_params = [p for url, p in requests_seen if url.endswith("/w/api.php")]
+    assert api_params
+    assert all(("maxlag" not in p) if interactive else p.get("maxlag") == "5" for p in api_params)
+
 def status(out):
     return json.loads(pathlib.Path(str(out) + ".state.json").read_text())
 

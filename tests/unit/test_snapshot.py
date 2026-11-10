@@ -205,7 +205,7 @@ def test_real_parquet_source_preparation_and_all_existing_pipeline_fields(tmp_pa
         calls = api.calls.copy()
         assert source.populate(directory, manifest, "test") == prepared
         assert calls == api.calls
-    monkeypatch.setattr(source, "prepare", lambda *a: {"prepared": prepared, "date": "snapshot"})
+    monkeypatch.setattr(source, "prepare", lambda *a, **kw: {"prepared": prepared, "date": "snapshot"})
     out = tmp_path / "people.jsonl"
     options = BulkOptions(limit=2, public_snapshot=directory)
     with FixtureAPI() as api:
@@ -318,7 +318,7 @@ def test_interrupted_job_refuses_replaced_source_revisions(tmp_path, monkeypatch
         for qid in __import__('re').findall(r"wd:(Q\d+)", q)])
     with FixtureAPI():
         source.populate(directory, manifest, "test")
-    monkeypatch.setattr(source, "prepare", lambda *a: {"revision": "original"})
+    monkeypatch.setattr(source, "prepare", lambda *a, **kw: {"revision": "original"})
     from wikidata_bulk_people._extract import PersonExtractor
     original = PersonExtractor.extract_many
     calls = []
@@ -334,7 +334,7 @@ def test_interrupted_job_refuses_replaced_source_revisions(tmp_path, monkeypatch
         extract_people(out, options=options)
     before = out.read_bytes()
     assert len(before.splitlines()) == 1
-    monkeypatch.setattr(source, "prepare", lambda *a: {"revision": "replacement"})
+    monkeypatch.setattr(source, "prepare", lambda *a, **kw: {"revision": "replacement"})
     monkeypatch.setattr(PersonExtractor, "extract_many", original)
     with pytest.raises(ValueError, match="source revisions changed"):
         extract_people(out, options=options)
@@ -358,21 +358,27 @@ def test_snapshot_objects_never_pollute_or_expire_with_the_live_cache(tmp_path):
     live.close()
 
 
-def test_sparse_article_fallbacks_are_batched_and_reusable(tmp_path):
+@pytest.mark.parametrize("interactive", [False, True])
+def test_sparse_article_fallbacks_are_batched_and_reusable(tmp_path, interactive):
     cache = ObjectCache(tmp_path / "cache.sqlite3")
     with closing(sqlite3.connect(":memory:")) as db:
         db.execute("CREATE TABLE entities(qid TEXT PRIMARY KEY,title TEXT)")
         db.executemany("INSERT INTO entities VALUES(?,?)",
                        [(f"Q{i}", f"Person Q{i}") for i in range(1000000, 1000024)])
         with FixtureAPI() as api:
-            commons = source.CommonsClient("test", cache=cache)
+            requests_seen = []
+            api.failure = lambda url, params: requests_seen.append((url, dict(params)))
+            commons = source.CommonsClient("test", cache=cache, interactive=interactive)
             try:
-                assert source._prefetch_fallbacks(db, cache, commons, "test") == 24
+                assert source._prefetch_fallbacks(db, cache, commons, "test", interactive=interactive) == 24
                 assert api.calls["articles"] == 2
                 assert api.calls["html"] == 24
                 before = api.calls.copy()
-                assert source._prefetch_fallbacks(db, cache, commons, "test") == 0
+                assert source._prefetch_fallbacks(db, cache, commons, "test", interactive=interactive) == 0
                 assert api.calls == before
+                params = [p for url, p in requests_seen if url.endswith("/w/api.php")]
+                assert params
+                assert all(("maxlag" not in p) if interactive else p.get("maxlag") == "5" for p in params)
             finally:
                 commons.close()
     cache.close()
@@ -429,10 +435,10 @@ def test_prepare_manifest_reuses_pinned_sources_and_rejects_changed_selection(tm
     (directory / "source-cache.sqlite3").touch()
     monkeypatch.setattr(source, "acquire_entities", lambda *a: {"etag": "version"})
     monkeypatch.setattr(source, "acquire_articles", lambda *a: {"revision": "fixed", "files": []})
-    monkeypatch.setattr(source, "populate", lambda *a: {"complete": True, "people": 2})
+    monkeypatch.setattr(source, "populate", lambda *a, **kw: {"complete": True, "people": 2})
     provenance = source.prepare(directory, PeopleFilter(), 2, "test")
     assert provenance["articles"]["revision"] == "fixed"
-    monkeypatch.setattr(source, "populate", lambda *a: pytest.fail("prepared source rebuilt"))
+    monkeypatch.setattr(source, "populate", lambda *a, **kw: pytest.fail("prepared source rebuilt"))
     assert source.prepare(directory, PeopleFilter(), 2, "test") == provenance
     with pytest.raises(ValueError, match="different selection"):
         source.prepare(directory, PeopleFilter(living=True), 2, "test")
@@ -520,7 +526,7 @@ def test_prepare_cancels_workers_before_releasing_lock(tmp_path, monkeypatch, fa
         source._write(directory / "manifest.json", {"files": []})
         interrupted_worker(stop)
 
-    def populate(*args):
+    def populate(*args, **kwargs):
         assert started.wait(5)
         raise OSError("populate failure")
 

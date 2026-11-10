@@ -57,10 +57,11 @@ def extract_person(
     qid_or_title: str,
     *,
     user_agent: str = f"wikidata-bulk-people/{__version__} (https://github.com/tristan00/wikidata-bulk-people)",
+    interactive: bool = True,
 ) -> Person:
     from wikidata_bulk_people._extract import PersonExtractor
 
-    extractor = PersonExtractor(user_agent=user_agent)
+    extractor = PersonExtractor(user_agent=user_agent, interactive=interactive)
     try:
         return extractor.extract(qid_or_title)
     finally:

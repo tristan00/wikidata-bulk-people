@@ -104,6 +104,7 @@ class BulkOptions:
     cache_ttl: float = 86400
     limit: int | None = None
     public_snapshot: Path | None = None
+    interactive: bool = False
 
     def __post_init__(self) -> None:
         if not 1 <= self.batch_size <= 50:

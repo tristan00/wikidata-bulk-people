@@ -90,6 +90,21 @@ def test_person_stdout(capsys: pytest.CaptureFixture[str]) -> None:
     assert data["name"] == "Albert Einstein"
 
 
+@pytest.mark.parametrize("flags,interactive", [((), True), (("--background",), False)])
+def test_person_request_policy(flags, interactive):
+    with patch(_PATCH_EXTRACT_PERSON, return_value=_make_person()) as extract:
+        assert _invoke("person", "Q937", *flags).value.code == 0
+    assert extract.call_args.kwargs["interactive"] is interactive
+
+
+@pytest.mark.parametrize("flag,target", [("--out", _PATCH_EXTRACT_PEOPLE), ("--csv-dir", _PATCH_EXTRACT_PEOPLE_TO_CSV), ("--db", _PATCH_EXTRACT_PEOPLE_TO_DB)])
+@pytest.mark.parametrize("flags,interactive", [((), False), (("--interactive",), True)])
+def test_bulk_request_policy(flags, interactive, flag, target):
+    with patch(target) as extract:
+        assert _invoke("people", flag, "destination", *flags).value.code == 0
+    assert extract.call_args.kwargs["options"].interactive is interactive
+
+
 def test_person_to_file(tmp_path: Path) -> None:
     out = tmp_path / "person.json"
     with patch(_PATCH_EXTRACT_PERSON, return_value=_make_person()):
@@ -98,6 +113,21 @@ def test_person_to_file(tmp_path: Path) -> None:
     assert exc.value.code == 0
     data = json.loads(out.read_text())
     assert data["qid"] == "Q937"
+
+
+def test_person_stdout_is_utf8_even_when_windows_pipe_defaults_to_cp1252():
+    import io
+    output = io.BytesIO()
+    stream = io.TextIOWrapper(output, encoding="cp1252")
+    person = _make_person()
+    person.name = "Mileva Marić – 東京"
+    try:
+        with patch.object(sys, "stdout", stream), patch(_PATCH_EXTRACT_PERSON, return_value=person):
+            assert _invoke("person", "Q937").value.code == 0
+        stream.flush()
+        assert json.loads(output.getvalue().decode("utf-8"))["name"] == person.name
+    finally:
+        stream.detach()
 
 
 def test_person_not_found(capsys: pytest.CaptureFixture[str]) -> None:

@@ -76,7 +76,8 @@ def _retry_after(value: str | None, fallback: float) -> float:
 
 class BaseClient:
     def __init__(self, user_agent: str, throttle_overrides: dict[str, float] | None = None,
-                 cache: ObjectCache | None = None) -> None:
+                 cache: ObjectCache | None = None, *, interactive: bool = False) -> None:
+        self._interactive = interactive
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": user_agent})
         self._session_owner = threading.get_ident()
@@ -110,6 +111,13 @@ class BaseClient:
     def _get(self, url: str, params: dict[str, Any] | None = None) -> Any:
         return self._request(url, params, text=False)
 
+    def _api_get(self, url: str, params: dict[str, Any]) -> Any:
+        # MediaWiki permits foreground reads without maxlag. Background jobs
+        # still yield to replication/query-service lag, independently of 429s.
+        if not self._interactive:
+            params = {**params, "maxlag": "5"}
+        return self._get(url, params)
+
     def _send(self, session: requests.Session, url: str,
               params: dict[str, Any] | None) -> requests.Response:
         original_host = urlparse(url).netloc
@@ -123,7 +131,8 @@ class BaseClient:
                 with self._metrics_lock:
                     self.requests += 1
                 if post:
-                    response = session.post(url, data=params, timeout=(10, 65), allow_redirects=False)
+                    response = session.post(url, data=params, timeout=(10, 65), allow_redirects=False,
+                                            headers={"Promise-Non-Write-API-Action": "true"})
                 else:
                     response = session.get(url, params=params, timeout=(10, 65), allow_redirects=False)
             if response.status_code not in (301, 302, 303, 307, 308):
@@ -151,6 +160,7 @@ class BaseClient:
         for attempt in range(_MAX_RETRIES):
             retry_header = None
             shared_cooldown = False
+            lagged = False
             try:
 
 
@@ -171,6 +181,7 @@ class BaseClient:
                         return data
                     code = error.get("code", "unknown") if isinstance(error, dict) else "unknown"
                     shared_cooldown = code == "ratelimited"
+                    lagged = code == "maxlag"
                     reason = f"Wikimedia API error {code}: {error}"
                     if code not in {"maxlag", "ratelimited", "readonly", "internal_api_error_DBQueryError",
                                     "internal_api_error_DBConnectionError", "timeout"}:
@@ -183,11 +194,15 @@ class BaseClient:
                     raise TransportError(url, status, f"Unexpected HTTP {status} from {url}")
             except (requests.RequestException, ValueError) as exc:
                 last = exc
+            delay = _retry_after(retry_header, _BACKOFF_BASE * 2 ** attempt)
+            if lagged:
+                delay = max(5.0, delay)
             if attempt + 1 == _MAX_RETRIES:
+                if lagged:
+                    _throttle.defer(host, delay)
                 if shared_cooldown and host in _WIKIMEDIA_API_HOSTS:
                     _throttle.defer("wikimedia-api", _retry_after(retry_header, 5))
                 break
-            delay = _retry_after(retry_header, _BACKOFF_BASE * 2 ** attempt)
             with self._metrics_lock:
                 self.retries += 1
             logger.warning("Retrying %s in %.1fs (%d/%d): %s", host, delay,
@@ -217,9 +232,9 @@ class WikidataClient(BaseClient):
             else:
                 pending.append(qid)
         for batch in chunks(pending, 50):
-            entities = self._entities(self._get(_WIKIDATA_API, {
+            entities = self._entities(self._api_get(_WIKIDATA_API, {
                 "action": "wbgetentities", "ids": "|".join(batch), "format": "json",
-                "languages": "en", "sitefilter": "enwiki", "maxlag": "5"}))
+                "languages": "en", "sitefilter": "enwiki"}))
             for qid in batch:
                 entity = entities.get(qid)
                 if not isinstance(entity, dict) or ("missing" not in entity and entity.get("id") != qid):
@@ -235,9 +250,9 @@ class WikidataClient(BaseClient):
         return entity
 
     def get_entity_by_title(self, title: str) -> dict[str, Any]:
-        entities = self._entities(self._get(_WIKIDATA_API, {
+        entities = self._entities(self._api_get(_WIKIDATA_API, {
             "action": "wbgetentities", "sites": "enwiki", "titles": title,
-            "format": "json", "languages": "en", "sitefilter": "enwiki", "maxlag": "5"}))
+            "format": "json", "languages": "en", "sitefilter": "enwiki"}))
         for qid, entity in entities.items():
             if "missing" not in entity and re.fullmatch(r"Q[1-9][0-9]*", qid):
                 self.cache.put_many({"entity:en:" + qid: entity})
@@ -255,9 +270,9 @@ class WikidataClient(BaseClient):
             else:
                 pending.append(qid)
         for batch in chunks(pending, 50):
-            entities = self._entities(self._get(_WIKIDATA_API, {
+            entities = self._entities(self._api_get(_WIKIDATA_API, {
                 "action": "wbgetentities", "ids": "|".join(batch), "props": "labels",
-                "languages": lang, "format": "json", "maxlag": "5"}))
+                "languages": lang, "format": "json"}))
             values = {}
             for qid in batch:
                 if qid not in entities:
@@ -305,12 +320,12 @@ class WikipediaClient(BaseClient):
         for batch in chunks(pending, 20):
             params: dict[str, Any] = {"action": "query", "titles": "|".join(batch),
                 "prop": "extracts|images", "exintro": "1", "explaintext": "1", "exlimit": "20",
-                "imlimit": "500", "redirects": "1", "format": "json", "maxlag": "5"}
+                "imlimit": "500", "redirects": "1", "format": "json"}
             pages: dict[str, Any] = {}
             aliases = {}
             continuations = set()
             while True:
-                data = self._get(_WIKIPEDIA_API, params)
+                data = self._api_get(_WIKIPEDIA_API, params)
                 for entry in _pages(data, _WIKIPEDIA_API).values():
                     title = entry.get("title")
                     if not isinstance(title, str):
@@ -350,8 +365,8 @@ class WikipediaClient(BaseClient):
 
 class CommonsClient(BaseClient):
     def __init__(self, user_agent: str, throttle_overrides: dict[str, float] | None = None,
-                 cache: ObjectCache | None = None) -> None:
-        super().__init__(user_agent, throttle_overrides, cache)
+                 cache: ObjectCache | None = None, *, interactive: bool = False) -> None:
+        super().__init__(user_agent, throttle_overrides, cache, interactive=interactive)
         self._pool = ThreadPoolExecutor(max_workers=3)
 
     def close(self) -> None:
@@ -389,10 +404,10 @@ class CommonsClient(BaseClient):
         return result
 
     def _fetch_image_batch(self, batch: list[str]) -> dict[str, dict[str, Any]]:
-        data = self._get(_COMMONS_API, {"action": "query", "titles": "|".join(batch),
+        data = self._api_get(_COMMONS_API, {"action": "query", "titles": "|".join(batch),
             "prop": "imageinfo", "iiprop": "url|dimensions|extmetadata", "iiurlwidth": "300",
             "iiextmetadatafilter": "ImageDescription|LicenseShortName|Artist", "iiextmetadatalanguage": "en",
-            "format": "json", "maxlag": "5"})
+            "format": "json"})
         pages = {p["title"]: p for p in _pages(data, _COMMONS_API).values()}
         aliases = {x["from"]: x["to"] for x in data.get("query", {}).get("normalized", [])}
         resolved = _resolve_titles(batch, pages, aliases, _COMMONS_API)

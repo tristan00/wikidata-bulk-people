@@ -62,6 +62,8 @@ def main() -> None:
     people_p.add_argument("--cache-ttl", type=float, default=86400, help="Live API cache lifetime in seconds; published sources stay frozen.")
     people_p.add_argument("--batch-size", type=int, default=50, help="People per enrichment batch (1..50).")
     people_p.add_argument("--workers", type=int, default=4, help="Assembly HTML workers (1..4); shared API concurrency is capped at 3.")
+    people_p.add_argument("--interactive", action="store_true",
+                          help="Foreground request: omit the optional maxlag gate while you wait; retain rate limiting and retries.")
     people_p.add_argument(
         "--if-exists",
         dest="if_exists",
@@ -111,6 +113,8 @@ def main() -> None:
 
     person_p = sub.add_parser("person", help="Extract a single person by QID or Wikipedia title.")
     person_p.add_argument("qid_or_title", metavar="QID_OR_TITLE")
+    person_p.add_argument("--background", action="store_true",
+                          help="Use maxlag=5 for unattended processing (single lookups default to foreground reads).")
     person_p.add_argument(
         "--out", metavar="PATH", help="Write JSON output to file (default: stdout)."
     )
@@ -134,7 +138,7 @@ def main() -> None:
         from wikidata_bulk_people._models import ExtractionError, NotFoundError, TransportError
 
         try:
-            person = extract_person(args.qid_or_title)
+            person = extract_person(args.qid_or_title, interactive=not args.background)
         except NotFoundError as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
@@ -151,6 +155,9 @@ def main() -> None:
         if args.out:
             pathlib.Path(args.out).write_text(output, encoding="utf-8")
         else:
+            reconfigure = getattr(sys.stdout, "reconfigure", None)
+            if reconfigure is not None:
+                reconfigure(encoding="utf-8")
             print(output)
         sys.exit(0)
 
@@ -201,6 +208,7 @@ def main() -> None:
                 job_path=pathlib.Path(args.job) if args.job else None,
                 cache_path=pathlib.Path(args.cache) if args.cache else None, cache_ttl=args.cache_ttl,
                 public_snapshot=pathlib.Path(args.public_snapshot) if args.public_snapshot else None,
+                interactive=args.interactive,
             )
             if args.db:
                 extract_people_to_db(

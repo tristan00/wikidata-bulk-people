@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Support foreground API reads for single lookups and opt-in interactive bulk jobs, while retaining background maxlag handling.
+- Honor the minimum maxlag wait and preserve its cooldown after retry exhaustion; identify long read-only POST requests to MediaWiki.
+- Write single-person CLI JSON to stdout as UTF-8, including Windows pipes and redirection.
 - Add batched extraction, durable recovery and reusable source caches.
 - Add published-source extraction for every bulk output, preserving Person fields.
 - Correct discovery ordering, retries, article revision selection and interrupted exports.
