@@ -6,7 +6,6 @@
 - Add published-source extraction for every bulk output, preserving Person fields.
 - Correct discovery ordering, retries, article revision selection and interrupted exports.
 - Validate incompatible options and optional dependencies consistently.
-- Test installed libraries in isolated environments and all outputs with 100,000 real records.
 - Remove audit artifacts, extra documents, comments, docstrings and automatic bot commits.
 
 ## [0.1.0] - 2026-05-01

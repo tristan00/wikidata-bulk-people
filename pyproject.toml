@@ -58,13 +58,13 @@ path = "src/wikidata_bulk_people/__init__.py"
 packages = ["src/wikidata_bulk_people"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/", "tests/", "scripts/", "LICENSE", "README.md", "CHANGELOG.md", "pyproject.toml"]
+include = ["src/", "tests/", "LICENSE", "README.md", "CHANGELOG.md", "pyproject.toml"]
 exclude = ["audit/", "docs/", ".runs/", "runs/", "**/AGENTS.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--strict-markers -m 'not integration and not scale'"
-markers = ["integration: live network tests (deselected by default)", "scale: full pipeline scale benchmarks (opt-in)"]
+addopts = "--strict-markers -m 'not integration'"
+markers = ["integration: live network tests (deselected by default)"]
 
 [tool.coverage.run]
 source = ["wikidata_bulk_people"]

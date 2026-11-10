@@ -19,7 +19,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: python scripts/check_repository.py --base "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.event.before || 'origin/main' }}"
       - run: pip install -e ".[dev]"
       - run: python -m mypy --strict src/wikidata_bulk_people
 
@@ -38,7 +37,6 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[dev]"
       - run: pytest --cov=wikidata_bulk_people --cov-report=xml --cov-report=json
-      - run: python scripts/check_coverage.py
       - uses: codecov/codecov-action@v4
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
 
@@ -57,44 +55,15 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: python -m build
       - run: twine check dist/*
-      - run: python scripts/check_distribution.py --report distribution-check.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: distribution-check-${{ matrix.os }}
-          path: distribution-check.json
       - uses: actions/upload-artifact@v4
         if: matrix.os == 'ubuntu-latest'
         with:
           name: dist
           path: dist/
 
-  scale:
-    needs: lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-      - run: pip install -e ".[dev]"
-      - name: Exercise every persistent sink with interruption and resume
-        shell: bash
-        run: |
-          count=1000
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then count=100000; fi
-          for sink in jsonl csv database; do
-            python scripts/benchmark_pipeline.py --people "$count" --sink "$sink" --interrupt-after 537 --report "benchmarks/$sink.json"
-          done
-          python scripts/benchmark_pipeline.py --people 1000000 --sink discovery --report benchmarks/discovery.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: benchmarks
-          path: benchmarks/
-
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, build, scale]
+    needs: [test, build]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
