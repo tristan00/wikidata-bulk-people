@@ -1,17 +1,13 @@
-"""Unit tests for CSVSink, DatabaseSink, and MemorySink in _sinks.py."""
-
 import csv
 import pathlib
 from datetime import datetime, timezone
+from unittest.mock import Mock
 
 import pytest
 
 from wikidata_bulk_people._models import DateValue, ImageRef, Person, SpouseRecord
-from wikidata_bulk_people._sinks import TABLE_FIELDS, CSVSink, DatabaseSink, MemorySink
+from wikidata_bulk_people._sinks import TABLE_FIELDS, CSVSink, DatabaseSink
 
-# ---------------------------------------------------------------------------
-# Shared fixtures
-# ---------------------------------------------------------------------------
 
 _NOW = datetime(2024, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -89,32 +85,8 @@ def _make_person(
     )
 
 
-# ---------------------------------------------------------------------------
-# MemorySink
-# ---------------------------------------------------------------------------
 
 
-def test_memory_sink_collects_records() -> None:
-    p1 = _make_person("Q1", "Alice")
-    p2 = _make_person("Q2", "Bob")
-    sink = MemorySink()
-    with sink:
-        sink.write(p1)
-        sink.write(p2)
-    assert sink.records == [p1, p2]
-
-
-def test_memory_sink_starts_empty() -> None:
-    sink = MemorySink()
-    assert sink.records == []
-    with sink:
-        pass
-    assert sink.records == []
-
-
-# ---------------------------------------------------------------------------
-# CSVSink
-# ---------------------------------------------------------------------------
 
 
 def test_csv_sink_creates_all_files(tmp_path: pathlib.Path) -> None:
@@ -148,7 +120,7 @@ def test_csv_sink_null_dates(tmp_path: pathlib.Path) -> None:
         sink.write(person)
 
     rows = list(csv.DictReader((tmp_path / "people.csv").open(encoding="utf-8")))
-    assert rows[0]["dob_year"] == ""  # None serialized as empty string in CSV
+    assert rows[0]["dob_year"] == ""
 
 
 def test_csv_sink_alias_rows(tmp_path: pathlib.Path) -> None:
@@ -225,11 +197,6 @@ def test_csv_sink_state_path(tmp_path: pathlib.Path) -> None:
     assert sink.state_path == tmp_path / ".pipeline.state.json"
 
 
-# ---------------------------------------------------------------------------
-# DatabaseSink
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture()
 def db_url(tmp_path: pathlib.Path) -> str:
     return f"sqlite:///{tmp_path / 'test.db'}"
@@ -297,10 +264,10 @@ def test_db_sink_child_tables(db_url: str) -> None:
         occupation_count = conn.execute(sa.text("SELECT COUNT(*) FROM person_occupations")).scalar()
     engine.dispose()
 
-    assert alias_count == 2  # "Alicia", "Al"
+    assert alias_count == 2
     assert spouse_count == 1
     assert image_count == 1
-    assert occupation_count == 2  # "writer", "teacher"
+    assert occupation_count == 2
 
 
 def test_db_sink_if_exists_fail_raises(db_url: str) -> None:
@@ -378,7 +345,7 @@ def test_db_sink_if_exists_upsert(db_url: str) -> None:
 def test_db_sink_append_schema_mismatch(tmp_path: pathlib.Path) -> None:
     import sqlalchemy as sa
 
-    # Create a table with a wrong schema manually.
+
     db_url = f"sqlite:///{tmp_path / 'mismatch.db'}"
     engine = sa.create_engine(db_url)
     with engine.connect() as conn:
@@ -409,14 +376,13 @@ def test_db_sink_table_prefix(tmp_path: pathlib.Path) -> None:
 
 
 def test_db_sink_pipeline_state(db_url: str) -> None:
-    """DatabaseSink correctly implements StatefulSink for state persistence."""
     state = {"completed": False, "last_qid": "Q1234"}
     sink = DatabaseSink(db_url)
     with sink:
         assert sink.read_pipeline_state() == {}
         sink.write_pipeline_state(state)
         assert sink.read_pipeline_state() == state
-        # Overwrite
+
         sink.write_pipeline_state({"completed": True, "last_qid": None})
         assert sink.read_pipeline_state()["completed"] is True
 
@@ -429,47 +395,99 @@ def test_db_sink_missing_sqlalchemy(monkeypatch: pytest.MonkeyPatch) -> None:
     def mock_import(name: str, *args: object, **kwargs: object) -> object:
         if name == "sqlalchemy":
             raise ImportError("No module named 'sqlalchemy'")
-        return real_import(name, *args, **kwargs)  # type: ignore[call-overload]
+        return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", mock_import)
     with pytest.raises(ImportError, match="wikidata-bulk-people\\[db\\]"):
         DatabaseSink("sqlite:///test.db")
 
 
-# ---------------------------------------------------------------------------
-# run_people_pipeline accepts all three sinks
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("phase", ["open", "body", "exit"])
+def test_csv_cleanup_closes_every_file_and_preserves_first_error(tmp_path, monkeypatch, phase):
+    sink = CSVSink(tmp_path)
+    first, second = Mock(), Mock()
+    close_error = OSError("close failed")
+    first.close.side_effect = close_error
+    second.close.side_effect = RuntimeError("another close failed")
+    sink._open_files = [first, second]
+    sink._writers["people"] = Mock()
+    original = ValueError("operation failed")
+    monkeypatch.setattr(sink, "_open", Mock(side_effect=original if phase == "open" else None,
+                                           return_value=sink))
+    expected = close_error if phase == "exit" else original
+    with pytest.raises(type(expected)) as caught:
+        with sink:
+            if phase == "body":
+                raise original
+    assert caught.value is expected
+    first.close.assert_called_once_with()
+    second.close.assert_called_once_with()
+    assert sink._open_files == []
+    assert sink._writers == {}
 
 
-def test_pipeline_accepts_memory_sink() -> None:
-    """run_people_pipeline runs end-to-end with MemorySink (no I/O)."""
-    from unittest.mock import MagicMock, patch
+@pytest.mark.parametrize("phase", ["open", "body", "flush"])
+def test_db_cleanup_preserves_operation_error(db_url, monkeypatch, phase):
+    sink = DatabaseSink(db_url)
+    connection, engine = Mock(), Mock()
+    connection.rollback.side_effect = OSError("rollback failed")
+    connection.close.side_effect = OSError("close failed")
+    engine.dispose.side_effect = OSError("dispose failed")
+    sink._conn, sink._engine = connection, engine
+    sink._buffers["people"].append({"qid": "Q1"})
+    original = ValueError("operation failed")
+    monkeypatch.setattr(sink, "_open", Mock(side_effect=original if phase == "open" else None,
+                                           return_value=sink))
+    monkeypatch.setattr(sink, "_flush", Mock(side_effect=original if phase == "flush" else None))
+    with pytest.raises(ValueError) as caught:
+        with sink:
+            if phase == "body":
+                raise original
+    assert caught.value is original
+    connection.close.assert_called_once_with()
+    engine.dispose.assert_called_once_with()
+    assert sink._conn is None and sink._engine is None
+    assert not any(sink._buffers.values())
 
-    from wikidata_bulk_people._extract import run_people_pipeline
-    from wikidata_bulk_people._models import PeopleFilter
 
-    person = _make_person()
+@pytest.mark.parametrize("failed_action", ["rollback", "close", "dispose"])
+def test_db_cleanup_attempts_all_actions(db_url, monkeypatch, failed_action):
+    sink = DatabaseSink(db_url)
+    sink._managed = True
+    connection, engine = Mock(), Mock()
+    sink._conn, sink._engine = connection, engine
+    sink._buffers["people"].append({"qid": "Q1"})
+    original = OSError(f"{failed_action} failed")
+    owner = engine if failed_action == "dispose" else connection
+    getattr(owner, failed_action).side_effect = original
+    monkeypatch.setattr(sink, "_open", lambda: sink)
+    with pytest.raises(OSError) as caught:
+        with sink:
+            pass
+    assert caught.value is original
+    connection.rollback.assert_called_once_with()
+    connection.close.assert_called_once_with()
+    engine.dispose.assert_called_once_with()
+    assert sink._conn is None and sink._engine is None
+    assert not any(sink._buffers.values())
 
-    with (
-        patch("wikidata_bulk_people._extract.QIDStream") as mock_stream_cls,
-        patch("wikidata_bulk_people._extract.PersonExtractor") as mock_extractor_cls,
-    ):
-        mock_stream = MagicMock()
-        mock_stream.iter_partition.return_value = iter(["Q1"])
-        mock_stream_cls.return_value = mock_stream
 
-        mock_extractor = MagicMock()
-        mock_extractor.extract.return_value = person
-        mock_extractor_cls.return_value = mock_extractor
-
-        sink = MemorySink()
-        run_people_pipeline(
-            sink,
-            filter=PeopleFilter(born_after=2020, born_before=2020),
-            resume=False,
-            user_agent="test/1.0",
-            state_path=None,
-        )
-
-    assert len(sink.records) == 1
-    assert sink.records[0].qid == "Q1"
+def test_db_flush_preserves_write_failure_when_rollback_fails(db_url, monkeypatch):
+    sink = DatabaseSink(db_url)
+    connection, engine = Mock(), Mock()
+    sink._conn, sink._engine = connection, engine
+    sink._tables = dict(sink._build_schema().tables)
+    original = OSError("write failed")
+    connection.execute.side_effect = original
+    connection.rollback.side_effect = OSError("rollback failed")
+    connection.close.side_effect = OSError("close failed")
+    monkeypatch.setattr(sink, "_open", lambda: sink)
+    with pytest.raises(OSError) as caught:
+        with sink:
+            sink.write(_make_person())
+    assert caught.value is original
+    connection.rollback.assert_called_once_with()
+    connection.close.assert_called_once_with()
+    engine.dispose.assert_called_once_with()
+    assert sink._conn is None and sink._engine is None
+    assert not any(sink._buffers.values())

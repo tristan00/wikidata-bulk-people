@@ -1,5 +1,3 @@
-"""Unit tests for low-level Wikidata claim parsing helpers in _util.py."""
-
 from wikidata_bulk_people._util import (
     _claim_values,
     _datavalue,
@@ -7,10 +5,6 @@ from wikidata_bulk_people._util import (
     _label,
     _parse_time,
 )
-
-# ---------------------------------------------------------------------------
-# Fixtures — inline dicts that mirror Wikidata API response shapes
-# ---------------------------------------------------------------------------
 
 
 def _time_snak(time_str: str, precision: int = 11, calendar: str = "gregorian") -> dict:
@@ -52,11 +46,6 @@ def _entity_with_claims(pid: str, snaks: list[dict]) -> dict:
             pid: [{"mainsnak": snak, "type": "statement", "rank": "normal"} for snak in snaks]
         }
     }
-
-
-# ---------------------------------------------------------------------------
-# _parse_time
-# ---------------------------------------------------------------------------
 
 
 class TestParseTime:
@@ -107,11 +96,6 @@ class TestParseTime:
         assert _parse_time({}) is None
 
 
-# ---------------------------------------------------------------------------
-# _datavalue
-# ---------------------------------------------------------------------------
-
-
 class TestDatavalue:
     def test_extracts_time_value(self) -> None:
         claim = {
@@ -139,11 +123,6 @@ class TestDatavalue:
         assert _datavalue({}) is None
 
 
-# ---------------------------------------------------------------------------
-# _label
-# ---------------------------------------------------------------------------
-
-
 class TestLabel:
     def test_english_label(self) -> None:
         entity = {"labels": {"en": {"language": "en", "value": "Albert Einstein"}}}
@@ -159,11 +138,6 @@ class TestLabel:
     def test_custom_lang(self) -> None:
         entity = {"labels": {"de": {"language": "de", "value": "Albert Einstein"}}}
         assert _label(entity, lang="de") == "Albert Einstein"
-
-
-# ---------------------------------------------------------------------------
-# _claim_values
-# ---------------------------------------------------------------------------
 
 
 class TestClaimValues:
@@ -185,11 +159,6 @@ class TestClaimValues:
         entity = _entity_with_claims("P21", [_entity_snak("Q6581097"), _entity_snak("Q1234")])
         vals = _claim_values(entity, "P21")
         assert len(vals) == 2
-
-
-# ---------------------------------------------------------------------------
-# _entity_qid_from_snak
-# ---------------------------------------------------------------------------
 
 
 class TestEntityQidFromSnak:

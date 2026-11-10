@@ -1,419 +1,450 @@
-"""HTTP clients for all Wikimedia APIs."""
-
 import logging
 import re
 import threading
 import time
+from collections.abc import Iterator
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import quote, unquote, urlencode, urlparse, urljoin
 
 import requests
 
+from wikidata_bulk_people._cache import ObjectCache
 from wikidata_bulk_people._models import NotFoundError, TransportError
 
 logger = logging.getLogger("wikidata_bulk_people")
-
-# ---------------------------------------------------------------------------
-# BaseClient
-# ---------------------------------------------------------------------------
-
-_DEFAULT_THROTTLE: dict[str, float] = {
-    "www.wikidata.org": 0.2,
-    "query.wikidata.org": 0.2,
-    "en.wikipedia.org": 0.1,
-    "commons.wikimedia.org": 0.1,
-    "en.wikipedia.org/api/rest_v1": 0.1,
-}
-
+_DEFAULT_THROTTLE = {"www.wikidata.org": 0.2, "query.wikidata.org": 0.2,
+                     "en.wikipedia.org": 0.1, "commons.wikimedia.org": 0.1}
 _MAX_RETRIES = 5
 _BACKOFF_BASE = 1.0
+_WIKIDATA_API = "https://www.wikidata.org/w/api.php"
+_WIKIPEDIA_API = "https://en.wikipedia.org/w/api.php"
+_COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+_REST_BASE = "https://en.wikipedia.org/w/rest.php/v1/page"
+
+
+def chunks(values: list[str], size: int) -> Iterator[list[str]]:
+    for start in range(0, len(values), size):
+        yield values[start:start + size]
 
 
 class _HostThrottle:
-    """Enforces a minimum inter-request interval per host."""
 
     def __init__(self) -> None:
         self._last: dict[str, float] = {}
+        self._cooldown: dict[str, float] = {}
         self._lock = threading.Lock()
 
     def wait(self, host: str, min_interval: float) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                delay = max(self._last.get(host, -min_interval) + min_interval,
+                            self._cooldown.get(host, 0.0)) - now
+                if delay <= 0:
+                    self._last[host] = now
+                    return
+            time.sleep(delay)
+
+    def defer(self, host: str, delay: float) -> None:
         with self._lock:
-            now = time.monotonic()
-            gap = now - self._last.get(host, 0.0)
-            if gap < min_interval:
-                time.sleep(min_interval - gap)
-            self._last[host] = time.monotonic()
+            self._cooldown[host] = max(self._cooldown.get(host, 0.0), time.monotonic() + delay)
 
 
 _throttle = _HostThrottle()
+_api_slots = threading.BoundedSemaphore(3)
+_WIKIMEDIA_API_HOSTS = {"www.wikidata.org", "en.wikipedia.org", "commons.wikimedia.org"}
+
+
+def _retry_after(value: str | None, fallback: float) -> float:
+    if value:
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            try:
+                dt = parsedate_to_datetime(value)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
+            except (ValueError, TypeError, OverflowError):
+                pass
+    return fallback
 
 
 class BaseClient:
-    """Shared HTTP base with User-Agent injection, throttling, and retry logic.
-
-    Args:
-        user_agent: Value for the ``User-Agent`` request header.
-        throttle_overrides: Optional per-host minimum interval overrides (seconds).
-    """
-
-    def __init__(
-        self,
-        user_agent: str,
-        throttle_overrides: dict[str, float] | None = None,
-    ) -> None:
+    def __init__(self, user_agent: str, throttle_overrides: dict[str, float] | None = None,
+                 cache: ObjectCache | None = None) -> None:
         self._session = requests.Session()
         self._session.headers.update({"User-Agent": user_agent})
-        self._throttle_map = dict(_DEFAULT_THROTTLE)
-        if throttle_overrides:
-            self._throttle_map.update(throttle_overrides)
+        self._session_owner = threading.get_ident()
+        self._thread_sessions: dict[int, requests.Session] = {}
+        self._sessions_lock = threading.Lock()
+        self._metrics_lock = threading.Lock()
+        self._throttle_map = {**_DEFAULT_THROTTLE, **(throttle_overrides or {})}
+        self.cache = cache if cache is not None else ObjectCache()
+        self.requests = self.retries = 0
+
+    def close(self) -> None:
+        self._session.close()
+        for session in self._thread_sessions.values():
+            session.close()
+        self._thread_sessions.clear()
+
+    def _request_session(self) -> requests.Session:
+        owner = threading.get_ident()
+        if owner == self._session_owner:
+            return self._session
+        with self._sessions_lock:
+            if owner not in self._thread_sessions:
+                session = requests.Session()
+                session.headers.update(self._session.headers)
+                self._thread_sessions[owner] = session
+            return self._thread_sessions[owner]
 
     def _min_interval(self, url: str) -> float:
-        for host, interval in self._throttle_map.items():
-            if host in url:
-                return interval
-        return 0.1
+        return self._throttle_map.get(urlparse(url).netloc, 0.1)
 
     def _get(self, url: str, params: dict[str, Any] | None = None) -> Any:
-        """Perform a GET request with throttle, retry, and backoff.
+        return self._request(url, params, text=False)
 
-        Args:
-            url: Full URL to request.
-            params: Optional query parameters.
+    def _send(self, session: requests.Session, url: str,
+              params: dict[str, Any] | None) -> requests.Response:
+        original_host = urlparse(url).netloc
+        post = bool(params and len(urlencode(params)) > 7000)
+        for _ in range(10):
+            host = urlparse(url).netloc
+            _throttle.wait(host, self._min_interval(url))
+            with _api_slots:
+                if host in _WIKIMEDIA_API_HOSTS:
+                    _throttle.wait("wikimedia-api", 0.3)
+                with self._metrics_lock:
+                    self.requests += 1
+                if post:
+                    response = session.post(url, data=params, timeout=(10, 65), allow_redirects=False)
+                else:
+                    response = session.get(url, params=params, timeout=(10, 65), allow_redirects=False)
+            if response.status_code not in (301, 302, 303, 307, 308):
+                return response
+            location = response.headers.get("Location")
+            target = urljoin(url, location or "")
+            if (not location or urlparse(target).scheme != "https" or
+                    (original_host in _WIKIMEDIA_API_HOSTS and urlparse(target).netloc not in _WIKIMEDIA_API_HOSTS)):
+                response.close()
+                raise TransportError(url, reason="Invalid or unexpected API redirect")
+            if response.status_code in (301, 302, 303):
+                post = False
+            if not post:
+                params = None
+            response.close()
+            url = target
+        raise TransportError(url, reason="Too many API redirects")
 
-        Returns:
-            Parsed JSON response.
-
-        Raises:
-            TransportError: After *_MAX_RETRIES* failed attempts.
-        """
-        from urllib.parse import urlparse
-
+    def _request(self, url: str, params: dict[str, Any] | None = None,
+                 *, text: bool = False) -> Any:
         host = urlparse(url).netloc
-        interval = self._min_interval(url)
-
-        last_exc: Exception | None = None
+        session = self._request_session()
+        last: Exception | None = None
+        status: int | None = None
         for attempt in range(_MAX_RETRIES):
-            _throttle.wait(host, interval)
+            retry_header = None
+            shared_cooldown = False
             try:
-                resp = self._session.get(url, params=params, timeout=30)
-            except requests.RequestException as exc:
-                last_exc = exc
-                wait = _BACKOFF_BASE * (2**attempt)
-                logger.warning(
-                    "Request error on attempt %d/%d: %s; retrying in %.1fs",
-                    attempt + 1,
-                    _MAX_RETRIES,
-                    exc,
-                    wait,
-                )
-                time.sleep(wait)
-                continue
-
-            if resp.status_code == 200:
-                return resp.json()
-
-            if resp.status_code == 429 or resp.status_code >= 500:
-                retry_after = float(resp.headers.get("Retry-After", _BACKOFF_BASE * (2**attempt)))
-                logger.warning(
-                    "HTTP %d from %s; retrying after %.1fs (attempt %d/%d)",
-                    resp.status_code,
-                    url,
-                    retry_after,
-                    attempt + 1,
-                    _MAX_RETRIES,
-                )
-                time.sleep(retry_after)
-                last_exc = TransportError(url, resp.status_code)
-                continue
-
-            raise TransportError(
-                url, resp.status_code, f"Unexpected HTTP {resp.status_code} from {url}"
-            )
-
-        raise TransportError(
-            url,
-            None,
-            f"Exhausted {_MAX_RETRIES} retries for {url}",
-        ) from last_exc
 
 
-# ---------------------------------------------------------------------------
-# WikidataClient
-# ---------------------------------------------------------------------------
+                resp = self._send(session, url, params)
+                status = resp.status_code
+                retry_header = resp.headers.get("Retry-After")
+                if status == 200:
+                    if text:
+                        content_type = resp.headers.get("Content-Type", "text/html")
+                        if "html" not in content_type or not resp.text.lstrip().startswith("<"):
+                            raise ValueError("Expected rendered HTML, not an empty/error response")
+                        return resp.text
+                    data = resp.json()
+                    if not isinstance(data, dict):
+                        raise ValueError("Expected a JSON object")
+                    error = data.get("error")
+                    if not error:
+                        return data
+                    code = error.get("code", "unknown") if isinstance(error, dict) else "unknown"
+                    shared_cooldown = code == "ratelimited"
+                    reason = f"Wikimedia API error {code}: {error}"
+                    if code not in {"maxlag", "ratelimited", "readonly", "internal_api_error_DBQueryError",
+                                    "internal_api_error_DBConnectionError", "timeout"}:
+                        raise TransportError(url, status, reason)
+                    last = TransportError(url, status, reason)
+                elif status == 429 or status >= 500:
+                    shared_cooldown = status == 429
+                    last = TransportError(url, status)
+                else:
+                    raise TransportError(url, status, f"Unexpected HTTP {status} from {url}")
+            except (requests.RequestException, ValueError) as exc:
+                last = exc
+            if attempt + 1 == _MAX_RETRIES:
+                if shared_cooldown and host in _WIKIMEDIA_API_HOSTS:
+                    _throttle.defer("wikimedia-api", _retry_after(retry_header, 5))
+                break
+            delay = _retry_after(retry_header, _BACKOFF_BASE * 2 ** attempt)
+            with self._metrics_lock:
+                self.retries += 1
+            logger.warning("Retrying %s in %.1fs (%d/%d): %s", host, delay,
+                           attempt + 1, _MAX_RETRIES, last)
+            _throttle.defer(host, delay)
+            if shared_cooldown and host in _WIKIMEDIA_API_HOSTS:
+                _throttle.defer("wikimedia-api", delay)
+        raise TransportError(url, status, f"Exhausted {_MAX_RETRIES} attempts for {url}: {last}") from last
 
-_WIKIDATA_API = "https://www.wikidata.org/w/api.php"
+    def _entities(self, data: Any) -> dict[str, Any]:
+        entities = data.get("entities")
+        if not isinstance(entities, dict) or not entities:
+            raise TransportError(_WIKIDATA_API, reason="Missing or invalid entities response")
+        return entities
 
 
 class WikidataClient(BaseClient):
-    """Fetches raw entity dicts from the Wikidata API."""
+    def get_entities(self, qids: list[str]) -> dict[str, dict[str, Any]]:
+        result: dict[str, dict[str, Any]] = {}
+        pending = []
+        for qid in dict.fromkeys(qids):
+            if not re.fullmatch(r"Q[1-9][0-9]*", qid):
+                raise ValueError(f"Invalid QID: {qid!r}")
+            hit, value = self.cache.get("entity:en:" + qid)
+            if hit:
+                result[qid] = value
+            else:
+                pending.append(qid)
+        for batch in chunks(pending, 50):
+            entities = self._entities(self._get(_WIKIDATA_API, {
+                "action": "wbgetentities", "ids": "|".join(batch), "format": "json",
+                "languages": "en", "sitefilter": "enwiki", "maxlag": "5"}))
+            for qid in batch:
+                entity = entities.get(qid)
+                if not isinstance(entity, dict) or ("missing" not in entity and entity.get("id") != qid):
+                    raise TransportError(_WIKIDATA_API, reason=f"Incomplete entity batch: {qid}")
+                result[qid] = entity
+            self.cache.put_many({"entity:en:" + q: result[q] for q in batch})
+        return result
 
     def get_entity(self, qid: str) -> dict[str, Any]:
-        """Fetch a single Wikidata entity by QID.
-
-        Args:
-            qid: Wikidata QID, e.g. "Q937".
-
-        Returns:
-            Raw entity dict from the API response.
-
-        Raises:
-            NotFoundError: If the entity does not exist or is missing.
-            TransportError: On network failure.
-        """
-        data = self._get(
-            _WIKIDATA_API,
-            params={
-                "action": "wbgetentities",
-                "ids": qid,
-                "format": "json",
-                "languages": "en",
-                "maxlag": "5",
-            },
-        )
-        entities: dict[str, Any] = data.get("entities", {})
-        entity: dict[str, Any] = entities.get(qid, {})
-        if entity.get("missing") == "":
+        entity = self.get_entities([qid.upper()])[qid.upper()]
+        if "missing" in entity:
             raise NotFoundError(qid)
         return entity
 
     def get_entity_by_title(self, title: str) -> dict[str, Any]:
-        """Fetch a Wikidata entity by its linked English Wikipedia article title.
-
-        Args:
-            title: Wikipedia article title, e.g. "Albert Einstein".
-
-        Returns:
-            Raw entity dict.
-
-        Raises:
-            NotFoundError: If no linked entity is found.
-            TransportError: On network failure.
-        """
-        data = self._get(
-            _WIKIDATA_API,
-            params={
-                "action": "wbgetentities",
-                "sites": "enwiki",
-                "titles": title,
-                "format": "json",
-                "languages": "en",
-                "maxlag": "5",
-            },
-        )
-        entities: dict[str, Any] = data.get("entities", {})
-        for entity_qid, entity in entities.items():
-            entity_dict: dict[str, Any] = entity
-            if entity_dict.get("missing") == "":
-                raise NotFoundError(title)
-            if not entity_qid.startswith("-"):
-                return entity_dict
+        entities = self._entities(self._get(_WIKIDATA_API, {
+            "action": "wbgetentities", "sites": "enwiki", "titles": title,
+            "format": "json", "languages": "en", "sitefilter": "enwiki", "maxlag": "5"}))
+        for qid, entity in entities.items():
+            if "missing" not in entity and re.fullmatch(r"Q[1-9][0-9]*", qid):
+                self.cache.put_many({"entity:en:" + qid: entity})
+                return dict(entity)
         raise NotFoundError(title)
 
     def get_labels(self, qids: list[str], lang: str = "en") -> dict[str, str]:
-        """Fetch labels for a batch of QIDs.
-
-        Args:
-            qids: List of QIDs.
-            lang: Language code (default "en").
-
-        Returns:
-            Mapping of QID → label string.
-        """
-        if not qids:
-            return {}
-        data = self._get(
-            _WIKIDATA_API,
-            params={
-                "action": "wbgetentities",
-                "ids": "|".join(qids),
-                "props": "labels",
-                "languages": lang,
-                "format": "json",
-                "maxlag": "5",
-            },
-        )
-        result: dict[str, str] = {}
-        for qid, entity in data.get("entities", {}).items():
-            labels = entity.get("labels", {})
-            label_entry = labels.get(lang)
-            if label_entry:
-                result[qid] = label_entry["value"]
+        result = {}
+        pending = []
+        for qid in dict.fromkeys(qids):
+            hit, value = self.cache.get(f"label:{lang}:{qid}")
+            if hit:
+                if value is not None:
+                    result[qid] = str(value)
+            else:
+                pending.append(qid)
+        for batch in chunks(pending, 50):
+            entities = self._entities(self._get(_WIKIDATA_API, {
+                "action": "wbgetentities", "ids": "|".join(batch), "props": "labels",
+                "languages": lang, "format": "json", "maxlag": "5"}))
+            values = {}
+            for qid in batch:
+                if qid not in entities:
+                    raise TransportError(_WIKIDATA_API, reason=f"Incomplete labels batch: {qid}")
+                label = entities[qid].get("labels", {}).get(lang, {}).get("value")
+                values[f"label:{lang}:{qid}"] = label
+                if label is not None:
+                    result[qid] = str(label)
+            self.cache.put_many(values)
         return result
 
 
-# ---------------------------------------------------------------------------
-# WikipediaClient
-# ---------------------------------------------------------------------------
+def _pages(data: Any, url: str) -> dict[str, Any]:
+    pages = data.get("query", {}).get("pages")
+    if not isinstance(pages, dict) or not pages:
+        raise TransportError(url, reason="Missing or invalid query.pages response")
+    return pages
 
-_WIKIPEDIA_API = "https://en.wikipedia.org/w/api.php"
+
+def _resolve_titles(titles: list[str], pages: dict[str, Any], aliases: dict[str, str],
+                    url: str) -> dict[str, Any]:
+    result = {}
+    for title in titles:
+        target = title
+        visited = set()
+        while target in aliases and target not in visited:
+            visited.add(target)
+            target = aliases[target]
+        if target not in pages:
+            raise TransportError(url, reason=f"Incomplete page batch: {title}")
+        result[title] = pages[target]
+    return result
 
 
 class WikipediaClient(BaseClient):
-    """Fetches article extracts and image lists from the English Wikipedia API."""
+    def get_pages(self, titles: list[str]) -> dict[str, dict[str, Any]]:
+        result = {}
+        pending = []
+        for title in dict.fromkeys(titles):
+            hit, value = self.cache.get("enwiki:page:" + title)
+            if hit:
+                result[title] = value
+            else:
+                pending.append(title)
+        for batch in chunks(pending, 20):
+            params: dict[str, Any] = {"action": "query", "titles": "|".join(batch),
+                "prop": "extracts|images", "exintro": "1", "explaintext": "1", "exlimit": "20",
+                "imlimit": "500", "redirects": "1", "format": "json", "maxlag": "5"}
+            pages: dict[str, Any] = {}
+            aliases = {}
+            continuations = set()
+            while True:
+                data = self._get(_WIKIPEDIA_API, params)
+                for entry in _pages(data, _WIKIPEDIA_API).values():
+                    title = entry.get("title")
+                    if not isinstance(title, str):
+                        raise TransportError(_WIKIPEDIA_API, reason="Page is missing its title")
+                    page = pages.setdefault(title, {"images": []})
+                    page["images"].extend(img["title"] for img in entry.get("images", []))
+                    if "extract" in entry:
+                        page["extract"] = entry["extract"]
+                    if "missing" in entry:
+                        page["missing"] = True
+                for kind in ("normalized", "redirects", "converted"):
+                    aliases.update({x["from"]: x["to"] for x in data.get("query", {}).get(kind, [])})
+                cont = data.get("continue")
+                if not cont:
+                    break
+                token = repr(sorted(cont.items()))
+                if token in continuations:
+                    raise TransportError(_WIKIPEDIA_API, reason="Repeated continuation token")
+                continuations.add(token)
+                params.update(cont)
+            resolved = _resolve_titles(batch, pages, aliases, _WIKIPEDIA_API)
+            for page in resolved.values():
+                page["images"] = list(dict.fromkeys(page["images"]))
+                if "extract" not in page and not page.get("missing"):
+                    raise TransportError(_WIKIPEDIA_API, reason="Incomplete extracts response")
+            self.cache.put_many({"enwiki:page:" + k: v for k, v in resolved.items()})
+            result.update(resolved)
+        return result
 
     def get_extract(self, title: str) -> str | None:
-        """Fetch the introductory plain-text extract for a Wikipedia article.
-
-        Args:
-            title: Wikipedia article title.
-
-        Returns:
-            Plain-text intro extract, or None if not available.
-        """
-        data = self._get(
-            _WIKIPEDIA_API,
-            params={
-                "action": "query",
-                "titles": title,
-                "prop": "extracts",
-                "exintro": "1",
-                "explaintext": "1",
-                "format": "json",
-                "maxlag": "5",
-            },
-        )
-        pages: dict[str, Any] = data.get("query", {}).get("pages", {})
-        for page in pages.values():
-            extract = page.get("extract")
-            if extract:
-                return str(extract)
-        return None
+        value = self.get_pages([title])[title].get("extract")
+        return str(value) if value else None
 
     def get_image_list(self, title: str) -> list[str]:
-        """Fetch the list of image filenames used in a Wikipedia article.
-
-        Args:
-            title: Wikipedia article title.
-
-        Returns:
-            List of "File:*" titles (may include non-image files).
-        """
-        images: list[str] = []
-        params: dict[str, Any] = {
-            "action": "query",
-            "titles": title,
-            "prop": "images",
-            "imlimit": "50",
-            "format": "json",
-            "maxlag": "5",
-        }
-        while True:
-            data = self._get(_WIKIPEDIA_API, params=params)
-            pages: dict[str, Any] = data.get("query", {}).get("pages", {})
-            for page in pages.values():
-                for img in page.get("images", []):
-                    images.append(img["title"])
-            cont = data.get("continue", {})
-            if not cont:
-                break
-            params.update(cont)
-        return images
-
-
-# ---------------------------------------------------------------------------
-# CommonsClient
-# ---------------------------------------------------------------------------
-
-_COMMONS_API = "https://commons.wikimedia.org/w/api.php"
+        return list(self.get_pages([title])[title]["images"])
 
 
 class CommonsClient(BaseClient):
-    """Fetches image metadata from Wikimedia Commons."""
+    def __init__(self, user_agent: str, throttle_overrides: dict[str, float] | None = None,
+                 cache: ObjectCache | None = None) -> None:
+        super().__init__(user_agent, throttle_overrides, cache)
+        self._pool = ThreadPoolExecutor(max_workers=3)
+
+    def close(self) -> None:
+        self._pool.shutdown(wait=True, cancel_futures=True)
+        super().close()
+
+    def get_image_infos(self, filenames: list[str]) -> dict[str, dict[str, Any]]:
+        result = {}
+        pending = []
+        for filename in dict.fromkeys(filenames):
+            hit, value = self.cache.get("commons:info300:" + filename)
+            if hit:
+                result[filename] = value
+            else:
+                pending.append(filename)
+
+
+        batches = iter(chunks(pending, 50))
+        futures = {self._pool.submit(self._fetch_image_batch, batch)
+                   for batch in [next(batches, None) for _ in range(3)] if batch is not None}
+        try:
+            while futures:
+                done, futures = wait(futures, return_when=FIRST_COMPLETED)
+                for future in done:
+                    result.update(future.result())
+                    batch = next(batches, None)
+                    if batch is not None:
+                        futures.add(self._pool.submit(self._fetch_image_batch, batch))
+        finally:
+
+            for future in futures:
+                future.cancel()
+            if futures:
+                wait(futures)
+        return result
+
+    def _fetch_image_batch(self, batch: list[str]) -> dict[str, dict[str, Any]]:
+        data = self._get(_COMMONS_API, {"action": "query", "titles": "|".join(batch),
+            "prop": "imageinfo", "iiprop": "url|dimensions|extmetadata", "iiurlwidth": "300",
+            "iiextmetadatafilter": "ImageDescription|LicenseShortName|Artist", "iiextmetadatalanguage": "en",
+            "format": "json", "maxlag": "5"})
+        pages = {p["title"]: p for p in _pages(data, _COMMONS_API).values()}
+        aliases = {x["from"]: x["to"] for x in data.get("query", {}).get("normalized", [])}
+        resolved = _resolve_titles(batch, pages, aliases, _COMMONS_API)
+        values = {}
+        for filename, page in resolved.items():
+            infos = page.get("imageinfo", [])
+            if not infos and "missing" not in page and "invalid" not in page:
+                raise TransportError(_COMMONS_API, reason=f"Missing imageinfo: {filename}")
+            values[filename] = dict(infos[0]) if infos else {}
+        self.cache.put_many({"commons:info300:" + k: v for k, v in values.items()})
+        return values
 
     def get_image_info(self, filename: str) -> dict[str, Any]:
-        """Fetch image info for a single Commons file.
-
-        Args:
-            filename: File title including "File:" prefix, e.g. "File:Einstein_1921.jpg".
-
-        Returns:
-            Dict with keys: url, thumburl, width, height, extmetadata (may be partial/empty).
-        """
-        data = self._get(
-            _COMMONS_API,
-            params={
-                "action": "query",
-                "titles": filename,
-                "prop": "imageinfo",
-                "iiprop": "url|dimensions|extmetadata",
-                "iiurlwidth": "300",
-                "format": "json",
-            },
-        )
-        pages: dict[str, Any] = data.get("query", {}).get("pages", {})
-        for page in pages.values():
-            infos = page.get("imageinfo", [])
-            if infos:
-                return dict(infos[0])
-        return {}
+        return self.get_image_infos([filename])[filename]
 
 
-# ---------------------------------------------------------------------------
-# RestClient
-# ---------------------------------------------------------------------------
-
-_REST_BASE = "https://en.wikipedia.org/api/rest_v1/page/html"
-
-# Matches "/thumb/a/ab/Filename.jpg/300px-Filename.jpg" → "Filename.jpg"
-_THUMB_RE = re.compile(r"/thumb/[0-9a-f]/[0-9a-f]{2}/(.+?)/\d+px-", re.IGNORECASE)
+_THUMB_RE = re.compile(r"/thumb/[0-9a-f]/[0-9a-f]{2}/(.+?)/[^/]+$", re.IGNORECASE)
 _UPLOAD_RE = re.compile(r"/[0-9a-f]/[0-9a-f]{2}/(.+)$", re.IGNORECASE)
 
 
-class _AltParser(HTMLParser):
-    """Minimal SAX-style parser that collects (src, alt) pairs from <img> tags."""
+def _extract_filename(src: str) -> str | None:
+    path = urlparse(src).path
+    match = _THUMB_RE.search(path) or _UPLOAD_RE.search(path)
+    return unquote(match.group(1)) if match else None
 
+
+def _file_key(filename: str) -> str:
+    return unquote(filename).replace("_", " ").lower()
+
+
+class _AltParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self.alts: dict[str, str] = {}
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag != "img":
-            return
-        attr_map = dict(attrs)
-        src = attr_map.get("src") or ""
-        alt = attr_map.get("alt") or ""
-        if src and alt:
-            filename = _extract_filename(src)
-            if filename:
-                self.alts[filename.lower()] = alt
-
-
-def _extract_filename(src: str) -> str | None:
-    m = _THUMB_RE.search(src)
-    if m:
-        return m.group(1)
-    m = _UPLOAD_RE.search(src)
-    if m:
-        return m.group(1)
-    return None
+        if tag == "img":
+            attributes = dict(attrs)
+            filename = _extract_filename(attributes.get("src") or "")
+            alt = attributes.get("alt")
+            if filename and alt:
+                self.alts[_file_key(filename)] = alt
 
 
 class RestClient(BaseClient):
-    """Fetches rendered Wikipedia HTML to extract image alt attributes."""
-
     def extract_image_alts(self, title: str) -> dict[str, str]:
-        """Return a mapping of filename (lowercase) → alt text for all images on a page.
-
-        Args:
-            title: Wikipedia article title.
-
-        Returns:
-            Dict mapping lowercased Commons filename to alt text string.
-        """
-        import urllib.parse
-
-        encoded = urllib.parse.quote(title.replace(" ", "_"))
-        url = f"{_REST_BASE}/{encoded}"
-        try:
-            resp = self._session.get(url, timeout=30)
-            if resp.status_code != 200:
-                logger.debug("REST API returned %d for %s; skipping alts", resp.status_code, title)
-                return {}
-            html = resp.text
-        except requests.RequestException as exc:
-            logger.debug("REST API request failed for %s: %s; skipping alts", title, exc)
-            return {}
-
+        hit, value = self.cache.get("enwiki:alts:" + title)
+        if hit:
+            return dict(value)
+        url = f"{_REST_BASE}/{quote(title.replace(' ', '_'), safe='')}/html"
+        html = self._request(url, text=True)
         parser = _AltParser()
         parser.feed(html)
+        self.cache.put_many({"enwiki:alts:" + title: parser.alts})
         return parser.alts

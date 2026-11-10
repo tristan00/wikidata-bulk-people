@@ -1,18 +1,20 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
 ## [Unreleased]
+
+- Add batched extraction, durable recovery and reusable source caches.
+- Add published-source extraction for every bulk output, preserving Person fields.
+- Correct discovery ordering, retries, article revision selection and interrupted exports.
+- Validate incompatible options and optional dependencies consistently.
+- Test installed libraries in isolated environments and all outputs with 100,000 real records.
+- Remove audit artifacts, extra documents, comments, docstrings and automatic bot commits.
 
 ## [0.1.0] - 2026-05-01
 
 ### Added
-- `extract_person(qid_or_title)` — single-record extraction by QID or Wikipedia title
-- `extract_people(out, filter, resume)` — bulk streaming extraction to JSONL
-- `iter_people(filter)` — generator API for in-process streaming
+- `extract_person(qid_or_title)` - single-record extraction by QID or Wikipedia title
+- `extract_people(out, filter, resume)` - bulk streaming extraction to JSONL
+- `iter_people(filter)` - generator API for in-process streaming
 - `Person` dataclass with identity, vitals, career, relationships, media, prose, and provenance fields
 - `PeopleFilter` DSL for filtering by birth year, occupation, citizenship, and living status
 - Keyset-paginated, birth-year-partitioned QID acquisition via WDQS SPARQL

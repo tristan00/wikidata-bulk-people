@@ -1,5 +1,3 @@
-"""Unit tests for scripts/bump_version.py."""
-
 from __future__ import annotations
 
 import pathlib
@@ -7,12 +5,11 @@ import sys
 
 import pytest
 
-# Add scripts/ to sys.path so we can import bump_version directly without
-# making it a proper package.
+
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(_REPO_ROOT / "scripts"))
 
-import bump_version  # noqa: E402
+import bump_version
 
 
 class TestBumpString:
@@ -35,17 +32,15 @@ class TestBumpString:
 
 
 def _make_repo(tmp_path: pathlib.Path, version: str) -> pathlib.Path:
-    """Lay out a minimal repo skeleton with __init__.py and _models.py."""
     init = tmp_path / "src" / "wikidata_bulk_people" / "__init__.py"
     models = tmp_path / "src" / "wikidata_bulk_people" / "_models.py"
     init.parent.mkdir(parents=True)
     init.write_text(
-        f'"""docstring"""\n\nimport os\n\n__version__ = "{version}"\n\n'
+        f'import os\n\n__version__ = "{version}"\n\n'
         'def something() -> None:\n    pass\n',
         encoding="utf-8",
     )
     models.write_text(
-        f'"""docstring"""\n\n# Keep in sync with __version__ in __init__.py\n'
         f'_VERSION: str = "{version}"\n\n'
         'class Foo:\n    pass\n',
         encoding="utf-8",
@@ -81,7 +76,7 @@ class TestBumpFiles:
 
     def test_drift_between_files_raises(self, tmp_path: pathlib.Path) -> None:
         root = _make_repo(tmp_path, "0.1.0")
-        # Manually corrupt _models.py so its version differs.
+
         models = root / "src/wikidata_bulk_people/_models.py"
         models.write_text(
             models.read_text(encoding="utf-8").replace("0.1.0", "0.1.5"),
@@ -91,7 +86,6 @@ class TestBumpFiles:
             bump_version.bump_files("patch", root=root)
 
     def test_real_repo_versions_match(self) -> None:
-        """Sanity: the real repo's two version constants must already be in sync."""
         init_v = bump_version._read_current_version(
             _REPO_ROOT / bump_version._INIT_PATH, bump_version._INIT_RE
         )

@@ -29,6 +29,7 @@ classifiers = [
 
 [project.optional-dependencies]
 db = ["sqlalchemy>=2.0"]
+bulk = ["pyarrow>=14.0"]
 dev = [
     "pytest>=8.0",
     "sqlalchemy>=2.0",
@@ -37,6 +38,8 @@ dev = [
     "build>=1.2",
     "twine>=5.0",
     "types-requests",
+    "rdflib>=7.0",
+    "pyarrow>=14.0",
 ]
 
 [project.scripts]
@@ -55,16 +58,18 @@ path = "src/wikidata_bulk_people/__init__.py"
 packages = ["src/wikidata_bulk_people"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/", "tests/", "LICENSE", "README.md", "CHANGELOG.md", "pyproject.toml"]
+include = ["src/", "tests/", "scripts/", "LICENSE", "README.md", "CHANGELOG.md", "pyproject.toml"]
+exclude = ["audit/", "docs/", ".runs/", "runs/", "**/AGENTS.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--strict-markers -m 'not integration'"
-markers = ["integration: live network tests (deselected by default)"]
+addopts = "--strict-markers -m 'not integration and not scale'"
+markers = ["integration: live network tests (deselected by default)", "scale: full pipeline scale benchmarks (opt-in)"]
 
 [tool.coverage.run]
 source = ["wikidata_bulk_people"]
 branch = true
+omit = ["*/enums.py"]
 
 [tool.coverage.report]
 fail_under = 80
@@ -73,3 +78,7 @@ exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedE
 [tool.mypy]
 strict = true
 python_version = "3.13"
+
+[[tool.mypy.overrides]]
+module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true

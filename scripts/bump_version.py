@@ -1,16 +1,3 @@
-"""Bump the package version in __init__.py and _models.py.
-
-Usage:
-    python scripts/bump_version.py {major|minor|patch}
-
-Updates ``__version__`` in ``src/wikidata_bulk_people/__init__.py`` and
-``_VERSION`` in ``src/wikidata_bulk_people/_models.py`` (which must stay in sync).
-Prints the new version to stdout.
-
-Pure stdlib; no external deps. Used by the version-bump GitHub Actions workflow
-and exercised by ``tests/unit/test_bump_version.py``.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -26,19 +13,6 @@ _MODELS_RE = re.compile(r'^(_VERSION:\s*str\s*=\s*")(\d+)\.(\d+)\.(\d+)(")', re.
 
 
 def bump(version: str, segment: str) -> str:
-    """Return the new version string after bumping the named segment.
-
-    Args:
-        version: Current version like "1.2.3".
-        segment: One of "major", "minor", "patch".
-
-    Returns:
-        New version like "1.3.0" (minor bump resets patch; major resets both).
-
-    Raises:
-        ValueError: If segment is not one of the three allowed values, or
-            version doesn't match X.Y.Z.
-    """
     m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
     if not m:
         raise ValueError(f"version must be X.Y.Z, got {version!r}")
@@ -72,20 +46,6 @@ def _write_new_version(
 
 
 def bump_files(segment: str, *, root: pathlib.Path | None = None) -> str:
-    """Bump the version in both __init__.py and _models.py and return the new version.
-
-    Args:
-        segment: One of "major", "minor", "patch".
-        root: Repo root. Defaults to the current working directory. Tests pass
-            a temp dir.
-
-    Returns:
-        The new version string.
-
-    Raises:
-        ValueError: If the two files have different current versions, or any
-            update step fails.
-    """
     root = root or pathlib.Path.cwd()
     init_path = root / _INIT_PATH
     models_path = root / _MODELS_PATH

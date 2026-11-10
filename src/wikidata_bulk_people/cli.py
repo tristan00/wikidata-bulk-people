@@ -1,18 +1,15 @@
-"""wikidata-bulk-people command-line interface."""
-
 import argparse
 import sys
 
 
 def main() -> None:
-    """Entry point for the wikidata-bulk-people console script."""
     parser = argparse.ArgumentParser(
         prog="wikidata-bulk-people",
         description="Extract structured records from Wikipedia and Wikidata.",
     )
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
-    # wikidata-bulk-people people
+
     people_p = sub.add_parser("people", help="Bulk-extract all matching people.")
     out_group = people_p.add_mutually_exclusive_group(required=True)
     out_group.add_argument("--out", metavar="PATH", help="Output JSONL file path.")
@@ -28,14 +25,15 @@ def main() -> None:
     people_p.add_argument(
         "--political-ideology", metavar="QID", help="Filter by political ideology QID."
     )
-    people_p.add_argument(
+    article_group = people_p.add_mutually_exclusive_group()
+    article_group.add_argument(
         "--has-wikipedia-article",
         dest="has_wikipedia_article",
         action="store_true",
         default=True,
         help="Require an English Wikipedia article (default).",
     )
-    people_p.add_argument(
+    article_group.add_argument(
         "--no-wikipedia-article",
         dest="has_wikipedia_article",
         action="store_false",
@@ -55,7 +53,15 @@ def main() -> None:
         action="store_false",
         help="Only include deceased people.",
     )
-    people_p.add_argument("--limit", type=int, metavar="N", help="Stop after N records.")
+    people_p.add_argument("--limit", type=int, metavar="N", help="Process at most N distinct matches.")
+    people_p.add_argument("--verbose", action="store_true", help="Log discovery and enrichment progress.")
+    people_p.add_argument("--job", type=str, help="Path to durable SQLite job manifest.")
+    people_p.add_argument("--cache", type=str, help="Path to reusable live API cache (outside snapshot directory).")
+    people_p.add_argument("--public-snapshot", type=str, metavar="DIRECTORY",
+                          help="Acquire and use published public snapshots here; requires --limit and [bulk].")
+    people_p.add_argument("--cache-ttl", type=float, default=86400, help="Live API cache lifetime in seconds; published sources stay frozen.")
+    people_p.add_argument("--batch-size", type=int, default=50, help="People per enrichment batch (1..50).")
+    people_p.add_argument("--workers", type=int, default=4, help="Assembly HTML workers (1..4); shared API concurrency is capped at 3.")
     people_p.add_argument(
         "--if-exists",
         dest="if_exists",
@@ -69,18 +75,19 @@ def main() -> None:
         metavar="PREFIX",
         help="Prefix for database table names (only used with --db).",
     )
-    people_p.add_argument(
+    resume_group = people_p.add_mutually_exclusive_group()
+    resume_group.add_argument(
         "--resume",
         dest="resume",
         action="store_true",
         default=True,
-        help="Resume from state file (default).",
+        help="Resume the matching durable job (default); a completed job is a no-op.",
     )
-    people_p.add_argument(
+    resume_group.add_argument(
         "--no-resume",
         dest="resume",
         action="store_false",
-        help="Start fresh, ignoring any state file.",
+        help="Start a new job using --if-exists to handle existing output.",
     )
     people_p.add_argument(
         "--year-partition",
@@ -88,9 +95,7 @@ def main() -> None:
         action="store_true",
         default=False,
         help=(
-            "Iterate year-by-year (-3000 to 2030 + no-DOB bucket) instead of a single "
-            "unlimited stream. Avoids WDQS throttling for large queries. "
-            "born-after and born-before are ignored when this flag is set."
+            "Live APIs only: discover in birth-year partitions; does not bypass WDQS limits."
         ),
     )
     people_p.add_argument(
@@ -99,20 +104,18 @@ def main() -> None:
         action="store_false",
         default=True,
         help=(
-            "Drop ORDER BY ?item from SPARQL queries for higher throughput on large "
-            "result sets. May skip a small fraction of QIDs that fall below the "
-            "page lex-max but were not returned by WDQS. See PeopleFilter.ordered."
+            "Deprecated: rejected because unordered cursors can silently lose matches."
         ),
     )
 
-    # wikidata-bulk-people person
+
     person_p = sub.add_parser("person", help="Extract a single person by QID or Wikipedia title.")
     person_p.add_argument("qid_or_title", metavar="QID_OR_TITLE")
     person_p.add_argument(
         "--out", metavar="PATH", help="Write JSON output to file (default: stdout)."
-    )  # noqa: E501
+    )
 
-    # wikidata-bulk-people version
+
     sub.add_parser("version", help="Print version and exit.")
 
     args = parser.parse_args()
@@ -152,17 +155,21 @@ def main() -> None:
         sys.exit(0)
 
     if args.command == "people":
-        import itertools
         import pathlib
 
         from wikidata_bulk_people import (
+            BulkOptions,
+            IncompleteRunError,
             PeopleFilter,
             extract_people,
             extract_people_to_csv,
             extract_people_to_db,
-            iter_people,
         )
         from wikidata_bulk_people._models import TransportError
+
+        if args.verbose:
+            import logging
+            logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 
         f = PeopleFilter(
             born_after=args.born_after,
@@ -179,17 +186,28 @@ def main() -> None:
             ordered=args.ordered,
         )
 
-        # Validate --upsert only with --db
+
         if args.if_exists == "upsert" and not args.db:
             print("Error: --if-exists upsert is only valid with --db.", file=sys.stderr)
             sys.exit(1)
 
+        if args.table_prefix and not args.db:
+            print("Error: --table-prefix is only valid with --db.", file=sys.stderr)
+            sys.exit(1)
+
         try:
+            options = BulkOptions(
+                limit=args.limit, batch_size=args.batch_size, workers=args.workers,
+                job_path=pathlib.Path(args.job) if args.job else None,
+                cache_path=pathlib.Path(args.cache) if args.cache else None, cache_ttl=args.cache_ttl,
+                public_snapshot=pathlib.Path(args.public_snapshot) if args.public_snapshot else None,
+            )
             if args.db:
                 extract_people_to_db(
                     args.db,
                     filter=f,
                     resume=args.resume,
+                    options=options,
                     if_exists=args.if_exists,
                     table_prefix=args.table_prefix,
                 )
@@ -198,19 +216,13 @@ def main() -> None:
                     pathlib.Path(args.csv_dir),
                     filter=f,
                     resume=args.resume,
+                    options=options,
                     if_exists=args.if_exists,
                 )
-            elif args.limit is not None:
-                # Stream-and-write manually to honour the limit (JSONL only)
-                from wikidata_bulk_people._extract import JSONLSink
-
-                out_path = pathlib.Path(args.out)
-                with JSONLSink(out_path) as sink:
-                    for person in itertools.islice(iter_people(filter=f), args.limit):
-                        sink.write(person)
             else:
-                extract_people(pathlib.Path(args.out), filter=f, resume=args.resume)
-        except (ValueError, FileExistsError) as exc:
+                extract_people(pathlib.Path(args.out), filter=f, resume=args.resume,
+                               options=options, if_exists=args.if_exists)
+        except (ValueError, FileExistsError, ImportError, IncompleteRunError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         except TransportError as exc:

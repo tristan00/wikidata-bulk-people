@@ -1,5 +1,3 @@
-"""Unit tests for Wikidata QID enums."""
-
 import re
 
 import pytest
@@ -21,7 +19,6 @@ _QID_RE = re.compile(r"^Q\d+$")
 
 
 class TestQidEnumBase:
-    """_QidEnum behaviour shared by every subclass."""
 
     @pytest.mark.parametrize("cls", _ALL_ENUM_CLASSES)
     def test_all_values_are_qids(self, cls: type[_QidEnum]) -> None:
@@ -32,7 +29,6 @@ class TestQidEnumBase:
 
     @pytest.mark.parametrize("cls", _ALL_ENUM_CLASSES)
     def test_str_returns_qid(self, cls: type[_QidEnum]) -> None:
-        """str() and f-strings must produce the QID, not 'ClassName.MEMBER'."""
         for member in cls:
             assert str(member) == member.value
             assert f"{member}" == member.value
@@ -68,7 +64,6 @@ class TestQidEnumBase:
 
 
 class TestKnownValues:
-    """Spot-check specific members that should always be present."""
 
     def test_occupation_physicist(self) -> None:
         assert Occupation.PHYSICIST == "Q169470"
@@ -98,8 +93,8 @@ class TestKnownValues:
         names = Religion._member_names_
         for faith in ("ISLAM", "BUDDHISM", "HINDUISM", "JUDAISM"):
             assert faith in names, f"Religion.{faith} missing"
-        # Christianity is not an instance of Q9174/Q7066 in Wikidata so it doesn't appear
-        # as a top-level member, but denominations should be present.
+
+
         assert any("CHRISTIANITY" in n for n in names), "No Christianity-related entry in Religion"
 
     def test_political_ideology_has_core_ideologies(self) -> None:
@@ -109,13 +104,12 @@ class TestKnownValues:
 
     def test_award_has_nobel_prizes(self) -> None:
         names = Award._member_names_
-        # Nobel prizes should appear under some name containing NOBEL
+
         nobel_members = [n for n in names if "NOBEL" in n]
         assert len(nobel_members) > 0, "No Nobel Prize entries found in Award"
 
 
 class TestPeopleFilterAcceptsEnums:
-    """PeopleFilter should accept enum members and pass QIDs to SPARQL correctly."""
 
     def test_occupation_enum_in_filter(self) -> None:
         f = PeopleFilter(occupation_qid=Occupation.PHYSICIST)
@@ -149,7 +143,7 @@ class TestPeopleFilterAcceptsEnums:
         assert f.occupation_qid == "Q169470"
 
     def test_enum_produces_correct_sparql_constraint(self) -> None:
-        from wikidata_bulk_people._extract import _build_query
+        from wikidata_bulk_people._discovery import _build_query
 
         f = PeopleFilter(
             occupation_qid=Occupation.PHYSICIST,
@@ -165,7 +159,7 @@ class TestPeopleFilterAcceptsEnums:
         assert "wdt:P21" in q
 
     def test_new_filter_fields_produce_sparql_constraints(self) -> None:
-        from wikidata_bulk_people._extract import _build_query
+        from wikidata_bulk_people._discovery import _build_query
 
         f = PeopleFilter(
             religion_qid=Religion.ISLAM,
