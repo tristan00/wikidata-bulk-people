@@ -79,10 +79,4 @@ python scripts/check_distribution.py
 
 The distribution check installs wheels/extras and the source archive into isolated environments and runs the public API checks outside the checkout. Offline tests block unexpected HTTP; live tests require `pytest -m integration`.
 
-## Repository rules
-
-No comments or docstrings. New commit messages must be empty: `git commit --allow-empty-message -m ""`.
-
-Only README.md and CHANGELOG.md may be tracked as documentation. AGENTS.md is local-only and must never enter Git. Preserve LICENSE. Do not commit audit reports, datasets, caches or run outputs. No tracked file may exceed 1 MiB. Run `python scripts/check_repository.py` before committing and pushing.
-
 Code: MIT. Wikidata facts: CC0. Wikipedia text and Commons media retain their source licenses and attribution.
