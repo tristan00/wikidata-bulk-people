@@ -1,18 +1,16 @@
-"""Private parsing and filtering helpers. Not part of the public API."""
-
 import re
 from html.parser import HTMLParser
 from typing import Any
 
 from wikidata_bulk_people._models import DateValue
 
-# QID of the Gregorian calendar in Wikidata
+
 _GREGORIAN_QID = "Q1985727"
 
-# Image extensions to keep (everything else is filtered as "chrome")
+
 _IMAGE_EXTS = frozenset({".jpg", ".jpeg", ".png", ".gif", ".svg", ".tif", ".tiff", ".webp"})
 
-# Patterns that identify non-person/UI images
+
 _CHROME_PATTERNS = re.compile(
     r"""(?xi)
     ^(
@@ -43,7 +41,7 @@ _CHROME_PATTERNS = re.compile(
     re.IGNORECASE,
 )
 
-# Upload URL patterns for filename extraction
+
 _THUMB_RE = re.compile(
     r"/thumb/[0-9a-f]/[0-9a-f]{2}/(.+?)/\d+px-",
     re.IGNORECASE,
@@ -54,55 +52,32 @@ _DIRECT_RE = re.compile(
 )
 
 
-# ---------------------------------------------------------------------------
-# Date parsing
-# ---------------------------------------------------------------------------
-
-
 def _parse_time(value: dict[str, Any] | None) -> DateValue | None:
-    """Parse a Wikidata time snak value into a :class:`DateValue`.
-
-    Args:
-        value: The ``value`` dict from a time datavalue, or None.
-
-    Returns:
-        A :class:`DateValue`, or None if the input is absent or unparseable.
-    """
     if not value:
         return None
     time_str: str = value.get("time", "")
     if not time_str:
         return None
-    precision: int = int(value.get("precision", 11))
-    calendar_model: str = value.get("calendarmodel", "")
-    calendar = "gregorian" if _GREGORIAN_QID in calendar_model else "julian"
-
-    # Format: ±YYYY-MM-DDTHH:MM:SSZ
-    sign = -1 if time_str.startswith("-") else 1
-    stripped = time_str.lstrip("+-")
-    parts = stripped.split("T")[0].split("-")
-    if not parts:
+    try:
+        precision = int(value.get("precision", 11))
+        calendar_model = value.get("calendarmodel", "")
+        calendar = "gregorian" if _GREGORIAN_QID in calendar_model else "julian"
+        match = re.fullmatch(r"([+-]?)([0-9]+)-([0-9]{2})-([0-9]{2})T.*", time_str)
+        if match is None:
+            return None
+        year = int(match[2]) * (-1 if match[1] == "-" else 1)
+        month = int(match[3]) if precision >= 10 and match[3] != "00" else None
+        day = int(match[4]) if precision >= 11 and match[4] != "00" else None
+        if month is not None and not 1 <= month <= 12:
+            return None
+        if day is not None and not 1 <= day <= 31:
+            return None
+        return DateValue(year=year, month=month, day=day, calendar=calendar, precision=precision)
+    except (ValueError, TypeError):
         return None
-
-    year = sign * int(parts[0])
-    has_month = precision >= 10 and len(parts) > 1 and parts[1] != "00"
-    has_day = precision >= 11 and len(parts) > 2 and parts[2] != "00"
-    month: int | None = int(parts[1]) if has_month else None
-    day: int | None = int(parts[2]) if has_day else None
-
-    return DateValue(year=year, month=month, day=day, calendar=calendar, precision=precision)
-
-
-# ---------------------------------------------------------------------------
-# Claim helpers
-# ---------------------------------------------------------------------------
 
 
 def _datavalue(claim: dict[str, Any]) -> Any:
-    """Extract the datavalue value from a claim dict.
-
-    Returns None for novalue/somevalue snaks or missing data.
-    """
     mainsnak = claim.get("mainsnak", {})
     snaktype = mainsnak.get("snaktype", "value")
     if snaktype != "value":
@@ -114,7 +89,6 @@ def _datavalue(claim: dict[str, Any]) -> Any:
 
 
 def _label(entity: dict[str, Any], lang: str = "en") -> str | None:
-    """Return the label for *entity* in *lang*, or None."""
     labels = entity.get("labels", {})
     entry = labels.get(lang)
     if not entry:
@@ -122,9 +96,18 @@ def _label(entity: dict[str, Any], lang: str = "en") -> str | None:
     return str(entry["value"])
 
 
+def _valid_claims(entity: dict[str, Any], pid: str) -> list[dict[str, Any]]:
+    return [c for c in entity.get("claims", {}).get(pid, []) if c.get("rank") != "deprecated"]
+
+
+def _best_claims(entity: dict[str, Any], pid: str) -> list[dict[str, Any]]:
+    claims = _valid_claims(entity, pid)
+    preferred = [c for c in claims if c.get("rank") == "preferred"]
+    return preferred or claims
+
+
 def _claim_values(entity: dict[str, Any], pid: str) -> list[Any]:
-    """Return non-None datavalues for all claims with property *pid*."""
-    claims = entity.get("claims", {}).get(pid, [])
+    claims = _best_claims(entity, pid)
     result = []
     for claim in claims:
         val = _datavalue(claim)
@@ -134,7 +117,6 @@ def _claim_values(entity: dict[str, Any], pid: str) -> list[Any]:
 
 
 def _entity_qid_from_snak(snak: dict[str, Any]) -> str | None:
-    """Extract the QID from a wikibase-item snak, or return None."""
     snaktype = snak.get("snaktype", "value")
     if snaktype != "value":
         return None
@@ -144,22 +126,13 @@ def _entity_qid_from_snak(snak: dict[str, Any]) -> str | None:
     return str(dv["value"]["id"])
 
 
-# ---------------------------------------------------------------------------
-# Spouse classification
-# ---------------------------------------------------------------------------
-
-
 def _classify_spouse_claim(claim: dict[str, Any]) -> dict[str, Any]:
-    """Extract spouse metadata and is_former flag from a P26 claim.
-
-    Returns a dict with keys: qid, start_date, end_date, end_cause, is_former.
-    """
     qualifiers: dict[str, Any] = claim.get("qualifiers", {})
 
-    # Spouse QID
+
     qid = _entity_qid_from_snak(claim.get("mainsnak", {})) or ""
 
-    # Start date (P580)
+
     start_date: DateValue | None = None
     for q in qualifiers.get("P580", []):
         dv = q.get("datavalue", {}).get("value")
@@ -167,7 +140,7 @@ def _classify_spouse_claim(claim: dict[str, Any]) -> dict[str, Any]:
             start_date = _parse_time(dv)
             break
 
-    # End date (P582)
+
     end_date: DateValue | None = None
     for q in qualifiers.get("P582", []):
         dv = q.get("datavalue", {}).get("value")
@@ -175,10 +148,10 @@ def _classify_spouse_claim(claim: dict[str, Any]) -> dict[str, Any]:
             end_date = _parse_time(dv)
             break
 
-    # End cause (P1534)
+
     end_cause: str | None = None
     if "P1534" in qualifiers:
-        end_cause = "ended"  # label resolved later via WikidataClient.get_labels
+        end_cause = "ended"
 
     is_former = (end_date is not None) or (end_cause is not None)
 
@@ -191,24 +164,15 @@ def _classify_spouse_claim(claim: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Image filtering
-# ---------------------------------------------------------------------------
-
-
 def _looks_like_chrome(filename: str) -> bool:
-    """Return True if *filename* looks like a UI element, icon, flag, or non-image file."""
     import os
 
     ext = os.path.splitext(filename)[1].lower()
     if ext and ext not in _IMAGE_EXTS:
         return True
-    return bool(_CHROME_PATTERNS.match(filename))
 
 
-# ---------------------------------------------------------------------------
-# HTML helpers
-# ---------------------------------------------------------------------------
+    return bool(_CHROME_PATTERNS.match(filename.replace(" ", "_")))
 
 
 class _TagStripper(HTMLParser):
@@ -224,7 +188,6 @@ class _TagStripper(HTMLParser):
 
 
 def _strip_html(text: str | None) -> str | None:
-    """Strip HTML tags and normalise whitespace. Returns None for empty input."""
     if not text:
         return None
     stripper = _TagStripper()
@@ -234,16 +197,12 @@ def _strip_html(text: str | None) -> str | None:
 
 
 def _filename_from_upload_url(url: str) -> str | None:
-    """Extract the Commons filename from a Wikimedia upload URL.
-
-    Handles direct and thumb URL formats, including SVG-rendered-as-PNG thumbs.
-    """
     if not url:
         return None
     m = _THUMB_RE.search(url)
     if m:
         name = m.group(1)
-        # SVG rendered as PNG: "Flag.svg/300px-Flag.svg.png" → keep "Flag.svg"
+
         if name.endswith(".png") and ".svg" in name:
             name = name[: name.rfind(".png")]
         return name

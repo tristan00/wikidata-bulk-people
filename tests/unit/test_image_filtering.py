@@ -1,5 +1,3 @@
-"""Unit tests for image chrome-detection helper in _util.py."""
-
 import pytest
 
 from wikidata_bulk_people._util import _looks_like_chrome
@@ -35,6 +33,7 @@ class TestLooksLikeChrome:
     )
     def test_chrome_files_detected(self, filename: str) -> None:
         assert _looks_like_chrome(filename) is True, f"Expected chrome: {filename}"
+        assert _looks_like_chrome(filename.replace("_", " ")) is True
 
     @pytest.mark.parametrize(
         "filename",

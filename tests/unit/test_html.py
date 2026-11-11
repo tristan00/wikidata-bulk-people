@@ -1,5 +1,3 @@
-"""Unit tests for HTML helpers in _util.py and RestClient.extract_image_alts."""
-
 from wikidata_bulk_people._clients import RestClient
 from wikidata_bulk_people._util import _filename_from_upload_url, _strip_html
 
@@ -58,8 +56,9 @@ class TestExtractImageAlts:
         client = RestClient(user_agent="test/1.0")
         mock_resp = MagicMock()
         mock_resp.status_code = status
+        mock_resp.headers = {"Content-Type": "text/html"}
         mock_resp.text = html or ""
-        client._session = MagicMock()  # type: ignore[assignment]
+        client._session = MagicMock()
         client._session.get.return_value = mock_resp
         return client
 
@@ -71,8 +70,8 @@ class TestExtractImageAlts:
             'Curie_1920.jpg/300px-Curie_1920.jpg" alt="Marie Curie">'
         )
         alts = self._make_client(html).extract_image_alts("Albert Einstein")
-        assert alts.get("einstein_1921.jpg") == "Young Einstein"
-        assert alts.get("curie_1920.jpg") == "Marie Curie"
+        assert alts.get("einstein 1921.jpg") == "Young Einstein"
+        assert alts.get("curie 1920.jpg") == "Marie Curie"
 
     def test_image_without_alt_omitted(self) -> None:
         html = (
@@ -83,5 +82,7 @@ class TestExtractImageAlts:
         assert alts == {}
 
     def test_http_error_returns_empty(self) -> None:
-        alts = self._make_client(None, status=404).extract_image_alts("Nonexistent Page")
-        assert alts == {}
+        import pytest
+        from wikidata_bulk_people import TransportError
+        with pytest.raises(TransportError):
+            self._make_client(None, status=404).extract_image_alts("Nonexistent Page")

@@ -1,7 +1,6 @@
-"""Public dataclasses and exceptions for wikidata-bulk-people."""
-
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 from wikidata_bulk_people.enums import (
     Award,
@@ -12,21 +11,12 @@ from wikidata_bulk_people.enums import (
     Religion,
 )
 
-# Keep in sync with __version__ in __init__.py
+
 _VERSION: str = "0.1.1"
 
 
 @dataclass
 class DateValue:
-    """A parsed date from a Wikidata time snak.
-
-    Attributes:
-        year: Year (negative for BCE). May be the only field set for year-precision dates.
-        month: Month (1-12), or None for year-only precision.
-        day: Day (1-31), or None for year/month precision.
-        calendar: "gregorian" or "julian".
-        precision: Wikidata precision value (9=year, 10=month, 11=day).
-    """
 
     year: int
     month: int | None
@@ -37,21 +27,6 @@ class DateValue:
 
 @dataclass
 class ImageRef:
-    """A reference to a media file associated with a person.
-
-    Attributes:
-        filename: Commons filename without the "File:" prefix.
-        url: Full URL to the original image.
-        thumbnail_url: URL to a representative thumbnail (≤300 px wide).
-        width: Original image width in pixels, or None if unknown.
-        height: Original image height in pixels, or None if unknown.
-        alt: Alt text for the image, or None if not available.
-        description: Short Commons description, or None.
-        caption: Caption text from the Wikipedia article, or None.
-        license: SPDX licence identifier or human-readable string, or None.
-        artist: Attribution string, or None.
-        is_lead: True if this is the lead/infobox image for the Wikipedia article.
-    """
 
     filename: str
     url: str
@@ -61,23 +36,13 @@ class ImageRef:
     alt: str | None
     description: str | None
     caption: str | None
-    license: str | None  # noqa: A003
+    license: str | None
     artist: str | None
     is_lead: bool = False
 
 
 @dataclass
 class SpouseRecord:
-    """A single spouse relationship for a person.
-
-    Attributes:
-        qid: Wikidata QID of the spouse entity.
-        name: Display name of the spouse.
-        start_date: Marriage start date, or None if unknown.
-        end_date: Marriage end date, or None if still current or unknown.
-        end_cause: Reason for end of marriage (e.g. "divorce", "death of partner"), or None.
-        is_former: True if the marriage has ended.
-    """
 
     qid: str
     name: str
@@ -89,30 +54,6 @@ class SpouseRecord:
 
 @dataclass
 class Person:
-    """A structured record for a single person extracted from Wikipedia/Wikidata.
-
-    Attributes:
-        qid: Wikidata QID (e.g. "Q937").
-        wikipedia_title: English Wikipedia article title.
-        wikipedia_url: Full URL to the English Wikipedia article.
-        name: Display name (English label).
-        description: Short Wikidata description, or None.
-        aliases: List of alternative names.
-        date_of_birth: Parsed date of birth, or None.
-        date_of_death: Parsed date of death, or None (None for living people).
-        place_of_birth: Name of the place of birth, or None.
-        place_of_death: Name of the place of death, or None.
-        sex_or_gender: Gender label (e.g. "male", "female"), or None.
-        citizenships: List of citizenship country names.
-        occupations: List of occupation labels.
-        spouses: List of spouse relationships.
-        images: List of associated images, lead image first.
-        lead_paragraph: First paragraph of the Wikipedia article, plain text.
-        fetched_at: UTC timestamp when this record was fetched.
-        lastrevid: Wikidata entity revision ID at time of fetch.
-        extractor_version: wikidata-bulk-people version used to produce this record.
-        schema_version: Schema version string (currently "1").
-    """
 
     qid: str
     wikipedia_title: str | None
@@ -138,34 +79,6 @@ class Person:
 
 @dataclass
 class PeopleFilter:
-    """Filter parameters for bulk person extraction.
-
-    All fields default to "no restriction". Combine multiple fields to
-    narrow the result set.
-
-    Attributes:
-        born_after: Only include people born after this year (exclusive).
-        born_before: Only include people born before this year (exclusive).
-        occupation_qid: Only include people with this occupation (P106).
-        citizenship_qid: Only include people with this citizenship (P27).
-        gender_qid: Only include people with this gender identity (P21).
-        religion_qid: Only include people with this religion (P140).
-        award_qid: Only include people who received this award (P166).
-        political_ideology_qid: Only include people with this political ideology (P1142).
-        has_wikipedia_article: Only include people with an English Wikipedia article.
-        living: If True, only living people. If False, only deceased. None for both.
-        year_partition: If True, iterate over individual birth years (-3000 to 2030) plus a
-            no-DOB bucket instead of a single unlimited stream. Avoids WDQS throttling for
-            large queries. When enabled, ``born_after`` and ``born_before`` are ignored.
-            Combine only with filters that do not themselves span millions of results.
-        ordered: If True (default), the SPARQL query uses ``ORDER BY ?item`` so keyset
-            pagination is exhaustive. If False, the ``ORDER BY`` is dropped and the
-            cursor advances to the lex-max QID of each page. This trades exhaustiveness
-            for throughput: WDQS returns each page faster and is much less likely to
-            silently drop results past the first page, but a small fraction of matching
-            QIDs may be skipped (any QID lexicographically less than the page's lex-max
-            that WDQS happened not to return in the page is lost).
-    """
 
     born_after: int | None = None
     born_before: int | None = None
@@ -181,17 +94,40 @@ class PeopleFilter:
     ordered: bool = True
 
 
-# ---------------------------------------------------------------------------
-# Exceptions (previously in _errors.py)
-# ---------------------------------------------------------------------------
+@dataclass
+class BulkOptions:
+
+    batch_size: int = 50
+    workers: int = 4
+    job_path: Path | None = None
+    cache_path: Path | None = None
+    cache_ttl: float = 86400
+    limit: int | None = None
+    public_snapshot: Path | None = None
+    interactive: bool = False
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.batch_size <= 50:
+            raise ValueError("batch_size must be between 1 and 50")
+        if not 1 <= self.workers <= 4:
+            raise ValueError("workers must be between 1 and 4")
+        if self.cache_ttl < 0:
+            raise ValueError("cache_ttl must be nonnegative")
+        if self.limit is not None and self.limit < 0:
+            raise ValueError("limit must be nonnegative")
+        if self.public_snapshot is not None and (self.limit is None or self.limit < 1):
+            raise ValueError("public_snapshot requires a positive limit")
 
 
 class WikiUtilityError(Exception):
-    """Base class for all wikidata-bulk-people errors."""
+    pass
+
+
+class IncompleteRunError(WikiUtilityError):
+    pass
 
 
 class NotFoundError(WikiUtilityError):
-    """Raised when no entity matching the given QID or title is found."""
 
     def __init__(self, qid_or_title: str) -> None:
         super().__init__(f"Entity not found: {qid_or_title!r}")
@@ -199,7 +135,6 @@ class NotFoundError(WikiUtilityError):
 
 
 class TransportError(WikiUtilityError):
-    """Raised when all HTTP retries for a request are exhausted."""
 
     def __init__(self, url: str, status_code: int | None = None, reason: str = "") -> None:
         detail = f" (HTTP {status_code})" if status_code else ""
@@ -210,7 +145,6 @@ class TransportError(WikiUtilityError):
 
 
 class ExtractionError(WikiUtilityError):
-    """Raised when an entity exists but cannot be extracted as the expected type."""
 
     def __init__(self, qid: str, reason: str) -> None:
         super().__init__(f"Cannot extract {qid!r}: {reason}")

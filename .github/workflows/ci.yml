@@ -2,8 +2,9 @@ name: CI
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "speed-reliability-iteration"]
     tags: ["v*"]
+  workflow_dispatch:
   pull_request:
     branches: ["main"]
 
@@ -12,6 +13,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -32,22 +36,27 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: pip install -e ".[dev]"
-      - run: pytest --cov=wikidata_bulk_people --cov-report=xml
+      - run: pytest --cov=wikidata_bulk_people --cov-report=xml --cov-report=json
       - uses: codecov/codecov-action@v4
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.13'
 
   build:
     needs: lint
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
-      - run: pip install build twine
+      - run: pip install -e ".[dev]"
       - run: python -m build
       - run: twine check dist/*
       - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest'
         with:
           name: dist
           path: dist/

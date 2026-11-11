@@ -1,16 +1,13 @@
-"""Output sinks for the people pipeline: CSV, database, and in-memory."""
-
 import csv
+import dataclasses
 import json
 import pathlib
+from collections.abc import Callable, Iterable
 from types import TracebackType
-from typing import Any, Literal
+from typing import IO, Any, Literal
 
 from wikidata_bulk_people._models import DateValue, Person
 
-# ---------------------------------------------------------------------------
-# Normalized schema definition
-# ---------------------------------------------------------------------------
 
 _PEOPLE_FIELDS: list[str] = [
     "qid",
@@ -75,7 +72,7 @@ _IMAGE_FIELDS: list[str] = [
     "is_lead",
 ]
 
-# Ordered so that "people" (the parent) comes before child tables.
+
 TABLE_FIELDS: dict[str, list[str]] = {
     "people": _PEOPLE_FIELDS,
     "person_aliases": _ALIAS_FIELDS,
@@ -85,7 +82,7 @@ TABLE_FIELDS: dict[str, list[str]] = {
     "person_images": _IMAGE_FIELDS,
 }
 
-# Child tables in the order they must be deleted (FK-safe) before removing a person row.
+
 _CHILD_TABLES = [
     "person_images",
     "person_spouses",
@@ -94,16 +91,23 @@ _CHILD_TABLES = [
     "person_aliases",
 ]
 
-# Name suffix for the internal pipeline-state table (prefixed like data tables).
+
 _STATE_TABLE = "pipeline_state"
 
-# ---------------------------------------------------------------------------
-# Row-building helpers
-# ---------------------------------------------------------------------------
+
+def _cleanup(actions: Iterable[Callable[[], None]], error: BaseException | None = None) -> None:
+    failure: BaseException | None = None
+    for action in actions:
+        try:
+            action()
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+    if failure is not None and error is None:
+        raise failure
 
 
 def _date_cols(prefix: str, d: DateValue | None) -> dict[str, Any]:
-    """Return a dict of prefixed column-name → value for a DateValue (or nulls)."""
     if d is None:
         return {
             f"{prefix}year": None,
@@ -122,7 +126,6 @@ def _date_cols(prefix: str, d: DateValue | None) -> dict[str, Any]:
 
 
 def _person_to_rows(person: Person) -> dict[str, list[dict[str, Any]]]:
-    """Expand one Person into normalized rows for each table."""
     qid = person.qid
 
     people_row: dict[str, Any] = {
@@ -184,25 +187,19 @@ def _person_to_rows(person: Person) -> dict[str, list[dict[str, Any]]]:
     }
 
 
-# ---------------------------------------------------------------------------
-# MemorySink
-# ---------------------------------------------------------------------------
+class JSONLSink:
 
+    def __init__(self, path: pathlib.Path,
+                 if_exists: Literal["fail", "append", "replace"] = "append") -> None:
+        self._path = path
+        self._if_exists = if_exists
+        self._file: IO[str] | None = None
 
-class MemorySink:
-    """Collects :class:`~wikidata_bulk_people.Person` records in memory.
-
-    For large result sets prefer :func:`~wikidata_bulk_people.iter_people`, which
-    streams records without accumulating them.
-
-    Attributes:
-        records: Populated after the pipeline completes.
-    """
-
-    def __init__(self) -> None:
-        self.records: list[Person] = []
-
-    def __enter__(self) -> "MemorySink":
+    def __enter__(self) -> "JSONLSink":
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        if self._if_exists == "fail" and self._path.exists():
+            raise FileExistsError(self._path)
+        self._file = self._path.open("w" if self._if_exists == "replace" else "a", encoding="utf-8")
         return self
 
     def __exit__(
@@ -211,41 +208,19 @@ class MemorySink:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        pass
+        if self._file is not None:
+            self._file.close()
+            self._file = None
 
     def write(self, person: Person) -> None:
-        """Append *person* to :attr:`records`."""
-        self.records.append(person)
-
-
-# ---------------------------------------------------------------------------
-# CSVSink
-# ---------------------------------------------------------------------------
+        if self._file is None:
+            raise RuntimeError("JSONLSink must be used as a context manager")
+        d: dict[str, Any] = dataclasses.asdict(person)
+        self._file.write(json.dumps(d, default=str) + "\n")
+        self._file.flush()
 
 
 class CSVSink:
-    """Writes :class:`~wikidata_bulk_people.Person` records as normalized CSV files.
-
-    One file per table written to *directory*:
-
-    * ``people.csv`` — scalar person fields with inlined date columns
-    * ``person_aliases.csv``
-    * ``person_citizenships.csv``
-    * ``person_occupations.csv``
-    * ``person_spouses.csv``
-    * ``person_images.csv``
-
-    All files are UTF-8 encoded with LF line endings.
-    Pipeline state is saved to ``.pipeline.state.json`` inside *directory*.
-
-    Args:
-        directory: Target directory. Created if absent.
-        if_exists: Action when CSV files already exist:
-
-            * ``"fail"`` — raise :exc:`FileExistsError` (default)
-            * ``"append"`` — add rows; omit header if file is non-empty
-            * ``"replace"`` — truncate existing files before writing
-    """
 
     def __init__(
         self,
@@ -259,6 +234,18 @@ class CSVSink:
         self.state_path: pathlib.Path = directory / ".pipeline.state.json"
 
     def __enter__(self) -> "CSVSink":
+        try:
+            return self._open()
+        except BaseException as exc:
+            self._close(exc)
+            raise
+
+    def _close(self, error: BaseException | None = None) -> None:
+        handles, self._open_files = self._open_files, []
+        self._writers.clear()
+        _cleanup((handle.close for handle in handles), error)
+
+    def _open(self) -> "CSVSink":
         self._dir.mkdir(parents=True, exist_ok=True)
 
         if self._if_exists == "fail":
@@ -273,6 +260,14 @@ class CSVSink:
                     + ", ".join(p.name for p in existing)
                     + ". Use if_exists='append' or 'replace'."
                 )
+
+        if self._if_exists == "append":
+            for name, fields in TABLE_FIELDS.items():
+                path = self._dir / f"{name}.csv"
+                if path.exists() and path.stat().st_size:
+                    with path.open(newline="", encoding="utf-8") as handle:
+                        if next(csv.reader(handle), None) != fields:
+                            raise ValueError(f"CSV schema mismatch: {path}")
 
         for table_name, fields in TABLE_FIELDS.items():
             csv_path = self._dir / f"{table_name}.csv"
@@ -299,56 +294,16 @@ class CSVSink:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        for f in self._open_files:
-            f.close()
-        self._open_files.clear()
-        self._writers.clear()
+        self._close(exc_val)
 
     def write(self, person: Person) -> None:
-        """Write all normalized rows for *person* to the appropriate CSV files."""
         for table_name, rows in _person_to_rows(person).items():
             writer = self._writers[table_name]
             for row in rows:
                 writer.writerow(row)
 
 
-# ---------------------------------------------------------------------------
-# DatabaseSink
-# ---------------------------------------------------------------------------
-
-
 class DatabaseSink:
-    """Writes :class:`~wikidata_bulk_people.Person` records to a relational database.
-
-    Uses SQLAlchemy Core. Any SQLAlchemy-supported database is supported.
-    Requires the ``[db]`` extra::
-
-        pip install wikidata-bulk-people[db]
-
-    Creates six normalized tables (optionally prefixed) plus an internal
-    ``{prefix}pipeline_state`` table for resumable pipelines:
-
-    * ``{prefix}people``
-    * ``{prefix}person_aliases``
-    * ``{prefix}person_citizenships``
-    * ``{prefix}person_occupations``
-    * ``{prefix}person_spouses``
-    * ``{prefix}person_images``
-
-    For SQLite, ``PRAGMA foreign_keys = ON`` is emitted automatically.
-
-    Args:
-        connection_string: SQLAlchemy URL, e.g. ``"sqlite:///out.db"`` or
-            ``"postgresql://user:pass@host/db"``.
-        if_exists: Action when target tables already exist:
-
-            * ``"fail"`` — raise :exc:`ValueError` (default)
-            * ``"append"`` — insert rows; raise on schema mismatch
-            * ``"replace"`` — drop and recreate all tables
-            * ``"upsert"`` — delete existing rows per person then re-insert
-        table_prefix: Prepended to all table names, e.g. ``"wk_"``.
-        batch_size: Persons to buffer before flushing to the database.
-    """
 
     def __init__(
         self,
@@ -358,7 +313,7 @@ class DatabaseSink:
         batch_size: int = 500,
     ) -> None:
         try:
-            import sqlalchemy  # noqa: F401
+            import sqlalchemy
         except ImportError:
             raise ImportError(
                 "sqlalchemy is required for DatabaseSink. "
@@ -368,9 +323,12 @@ class DatabaseSink:
         self._connection_string = connection_string
         self._if_exists = if_exists
         self._prefix = table_prefix
+        if batch_size < 1:
+            raise ValueError("batch_size must be positive")
         self._batch_size = batch_size
+        self._managed = False
 
-        # Populated in __enter__
+
         self._engine: Any = None
         self._conn: Any = None
         self._meta: Any = None
@@ -378,18 +336,16 @@ class DatabaseSink:
         self._buffers: dict[str, list[dict[str, Any]]] = {n: [] for n in TABLE_FIELDS}
 
     def _tname(self, base: str) -> str:
-        """Return the prefixed database table name for *base*."""
         return f"{self._prefix}{base}"
 
     def _state_tname(self) -> str:
         return f"{self._prefix}{_STATE_TABLE}"
 
     def _build_schema(self) -> Any:
-        """Build and return a SQLAlchemy MetaData with all table definitions."""
         import sqlalchemy as sa
 
         meta = sa.MetaData()
-        p = self._tname  # shorthand
+        p = self._tname
 
         sa.Table(
             p("people"),
@@ -428,7 +384,7 @@ class DatabaseSink:
                 p(child_base),
                 meta,
                 sa.Column(
-                    "person_qid", sa.String, sa.ForeignKey(f"{p('people')}.qid"), nullable=False
+                    "person_qid", sa.String, sa.ForeignKey(f"{p('people')}.qid"), nullable=False, index=True
                 ),
                 sa.Column(value_col, sa.String, nullable=False),
             )
@@ -436,7 +392,7 @@ class DatabaseSink:
         sa.Table(
             p("person_spouses"),
             meta,
-            sa.Column("person_qid", sa.String, sa.ForeignKey(f"{p('people')}.qid"), nullable=False),
+            sa.Column("person_qid", sa.String, sa.ForeignKey(f"{p('people')}.qid"), nullable=False, index=True),
             sa.Column("spouse_qid", sa.String, nullable=False),
             sa.Column("name", sa.String),
             sa.Column("start_year", sa.Integer),
@@ -456,7 +412,7 @@ class DatabaseSink:
         sa.Table(
             p("person_images"),
             meta,
-            sa.Column("person_qid", sa.String, sa.ForeignKey(f"{p('people')}.qid"), nullable=False),
+            sa.Column("person_qid", sa.String, sa.ForeignKey(f"{p('people')}.qid"), nullable=False, index=True),
             sa.Column("filename", sa.String, nullable=False),
             sa.Column("url", sa.String),
             sa.Column("thumbnail_url", sa.String),
@@ -480,7 +436,6 @@ class DatabaseSink:
         return meta
 
     def _check_schema(self, inspector: Any) -> None:
-        """Raise ValueError if any existing data table has a mismatched schema."""
         for base_name, fields in TABLE_FIELDS.items():
             tname = self._tname(base_name)
             if not inspector.has_table(tname):
@@ -494,7 +449,40 @@ class DatabaseSink:
                     f"Extra columns: {sorted(actual - expected)}."
                 )
 
+    def validate_initial(self) -> None:
+        import sqlalchemy as sa
+        engine = sa.create_engine(self._connection_string)
+        try:
+            inspector = sa.inspect(engine)
+            existing = [self._tname(n) for n in TABLE_FIELDS if inspector.has_table(self._tname(n))]
+            if existing and self._if_exists == "fail":
+                raise ValueError(f"Tables already exist: {existing}")
+            if self._if_exists in ("append", "upsert"):
+                self._check_schema(inspector)
+        finally:
+            engine.dispose()
+
     def __enter__(self) -> "DatabaseSink":
+        try:
+            return self._open()
+        except BaseException as exc:
+            self._close(exc)
+            raise
+
+    def _close(self, error: BaseException | None = None, *, rollback: bool = False) -> None:
+        actions = []
+        if self._conn is not None:
+            if rollback:
+                actions.append(self._conn.rollback)
+            actions.append(self._conn.close)
+        if self._engine is not None:
+            actions.append(self._engine.dispose)
+        self._conn = self._engine = None
+        for rows in self._buffers.values():
+            rows.clear()
+        _cleanup(actions, error)
+
+    def _open(self) -> "DatabaseSink":
         import sqlalchemy as sa
 
         self._engine = sa.create_engine(self._connection_string)
@@ -515,7 +503,11 @@ class DatabaseSink:
 
         self._meta.create_all(self._engine, checkfirst=True)
 
-        # Populate table references by base name for use in write/flush.
+        for table in self._meta.tables.values():
+            for index in table.indexes:
+                index.create(self._engine, checkfirst=True)
+
+
         for base_name in TABLE_FIELDS:
             self._tables[base_name] = self._meta.tables[self._tname(base_name)]
         self._tables["_pipeline_state"] = self._meta.tables[self._state_tname()]
@@ -532,51 +524,54 @@ class DatabaseSink:
         exc_val: BaseException | None,
         exc_tb: TracebackType | None,
     ) -> None:
-        try:
-            self._flush()
-        finally:
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
-            if self._engine is not None:
-                self._engine.dispose()
-                self._engine = None
+        if exc_type is None and not self._managed:
+            try:
+                self._flush()
+            except BaseException as exc:
+                self._close(exc)
+                raise
+        self._close(exc_val, rollback=exc_type is not None or self._managed)
 
     def write(self, person: Person) -> None:
-        """Buffer all normalized rows for *person*; flush to the DB when batch is full."""
         for table_name, rows in _person_to_rows(person).items():
             self._buffers[table_name].extend(rows)
-        if len(self._buffers["people"]) >= self._batch_size:
+        if not self._managed and len(self._buffers["people"]) >= self._batch_size:
             self._flush()
 
-    def _flush(self) -> None:
-        """Write all buffered rows to the database in a single transaction."""
+    def _flush(self, state: dict[str, Any] | None = None) -> None:
         import sqlalchemy as sa
 
-        if not any(self._buffers.values()):
+        if not any(self._buffers.values()) and state is None:
             return
+        try:
+            if self._if_exists == "upsert":
+                person_qids = [row["qid"] for row in self._buffers["people"]]
 
-        if self._if_exists == "upsert":
-            person_qids = [row["qid"] for row in self._buffers["people"]]
-            if person_qids:
-                for child in _CHILD_TABLES:
-                    t = self._tables[child]
-                    self._conn.execute(sa.delete(t).where(t.c.person_qid.in_(person_qids)))
-                people_t = self._tables["people"]
-                self._conn.execute(sa.delete(people_t).where(people_t.c.qid.in_(person_qids)))
+                for start in range(0, len(person_qids), 500):
+                    batch = person_qids[start:start + 500]
+                    for child in _CHILD_TABLES:
+                        t = self._tables[child]
+                        self._conn.execute(sa.delete(t).where(t.c.person_qid.in_(batch)))
+                    t = self._tables["people"]
+                    self._conn.execute(sa.delete(t).where(t.c.qid.in_(batch)))
+            for table_name, rows in self._buffers.items():
+                if rows:
 
-        for table_name, rows in self._buffers.items():
-            if rows:
-                self._conn.execute(sa.insert(self._tables[table_name]).values(rows))
+                    self._conn.execute(sa.insert(self._tables[table_name]), rows)
+            if state is not None:
+                t = self._tables["_pipeline_state"]
+                self._conn.execute(sa.delete(t).where(t.c.key == "state"))
+                self._conn.execute(sa.insert(t).values(key="state", value=json.dumps(state)))
+            self._conn.commit()
+        except BaseException as exc:
+            _cleanup((self._conn.rollback,), exc)
+            raise
+        finally:
+            for rows in self._buffers.values():
+                rows.clear()
 
-        self._conn.commit()
-        for rows in self._buffers.values():
-            rows.clear()
-
-    # --- StatefulSink protocol ---
 
     def read_pipeline_state(self) -> dict[str, Any]:
-        """Read pipeline state from the ``{prefix}pipeline_state`` table."""
         import sqlalchemy as sa
 
         t = self._tables["_pipeline_state"]
@@ -587,10 +582,21 @@ class DatabaseSink:
         return result
 
     def write_pipeline_state(self, state: dict[str, Any]) -> None:
-        """Persist pipeline state to the ``{prefix}pipeline_state`` table."""
-        import sqlalchemy as sa
+        self._flush(state)
 
+    def finalize_pipeline_state(self, state: dict[str, Any]) -> None:
+        import sqlalchemy as sa
+        engine = sa.create_engine(self._connection_string)
         t = self._tables["_pipeline_state"]
-        self._conn.execute(sa.delete(t).where(t.c.key == "state"))
-        self._conn.execute(sa.insert(t).values(key="state", value=json.dumps(state)))
-        self._conn.commit()
+        try:
+            with engine.begin() as connection:
+                value = connection.execute(sa.select(t.c.value).where(t.c.key == "state")).scalar()
+                if value:
+                    previous = json.loads(value)
+                    if previous.get("job_id") != state["job_id"] or previous["export_seq"] != state["export_seq"]:
+                        raise ValueError("Database export state changed before completion")
+                    connection.execute(sa.update(t).where(t.c.key == "state").values(value=json.dumps(state)))
+                else:
+                    connection.execute(sa.insert(t).values(key="state", value=json.dumps(state)))
+        finally:
+            engine.dispose()

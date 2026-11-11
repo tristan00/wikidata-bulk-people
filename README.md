@@ -1,246 +1,216 @@
 # wikidata-bulk-people
 
-Extract structured records from Wikipedia and Wikidata at scale.
-
-[![PyPI](https://img.shields.io/pypi/v/wikidata-bulk-people)](https://pypi.org/project/wikidata-bulk-people/)
-[![Python](https://img.shields.io/pypi/pyversions/wikidata-bulk-people)](https://pypi.org/project/wikidata-bulk-people/)
-[![CI](https://github.com/tristan00/wikidata-bulk-people/actions/workflows/ci.yml/badge.svg)](https://github.com/tristan00/wikidata-bulk-people/actions)
-
-## Install
-
-```bash
-pip install wikidata-bulk-people          # base — JSONL, CSV, and in-memory output
-pip install wikidata-bulk-people[db]      # adds SQLAlchemy for database output
-```
+Extract people from Wikidata and English Wikipedia as Python objects, JSONL, CSV, or database tables, using live APIs or published snapshots.
 
 ## Quick start
 
+Look up a person by Wikidata QID or English Wikipedia title:
+
 ```python
-from wikidata_bulk_people import extract_person, iter_people, PeopleFilter, Occupation
+from wikidata_bulk_people import extract_person
 
-# Single person by QID or Wikipedia article title:
-einstein = extract_person("Q937")
-print(einstein.name, einstein.date_of_birth)
-
-# Iterate over matching people (streaming, no disk I/O):
-for person in iter_people(filter=PeopleFilter(occupation_qid=Occupation.WRITER, born_after=1900)):
-    print(person.name, person.date_of_birth)
-
-# For large queries (>500 results), use year_partition to avoid WDQS throttling:
-for person in iter_people(filter=PeopleFilter(occupation_qid=Occupation.PHYSICIST, year_partition=True)):
-    print(person.name)
+person = extract_person("Albert Einstein")  # or "Q937"
+print(person.name, person.date_of_birth, person.occupations)
 ```
 
-## Output formats
-
-### JSONL (resumable streaming)
+Export up to 100 physicists:
 
 ```python
-from wikidata_bulk_people import extract_people, PeopleFilter, Occupation
+from wikidata_bulk_people import BulkOptions, Occupation, PeopleFilter, extract_people
 
 extract_people(
-    "writers.jsonl",
-    filter=PeopleFilter(occupation_qid=Occupation.WRITER, born_after=1900),
+    "physicists.jsonl",
+    filter=PeopleFilter(occupation_qid=Occupation.PHYSICIST),
+    options=BulkOptions(limit=100, interactive=True),
+    if_exists="fail",
 )
 ```
 
-One JSON object per line. Resumes automatically from a `.state.json` file alongside
-the output if interrupted.
+Omitting `limit` requests all matches.
 
-### CSV (normalized directory)
+## Python API
+
+| Function | Result | Resumable |
+| --- | --- | --- |
+| `extract_person(qid_or_title)` | One `Person`; live APIs only | No |
+| `iter_people(...)` | Iterator of `Person` objects | No |
+| `extract_people_to_memory(...)` | List of `Person` objects | No |
+| `extract_people(path, ...)` | JSONL | Yes |
+| `extract_people_to_csv(directory, ...)` | Six CSV files | Yes |
+| `extract_people_to_db(connection_string, ...)` | Six data tables plus pipeline state | Yes |
+
+All bulk functions support live APIs and snapshots through `options=BulkOptions(...)`, and selection through `filter=PeopleFilter(...)`. All extraction functions accept `user_agent`.
 
 ```python
-from wikidata_bulk_people import extract_people_to_csv, PeopleFilter, Occupation
-
-extract_people_to_csv(
-    "writers_csv/",
-    filter=PeopleFilter(occupation_qid=Occupation.WRITER, born_after=1900),
+from wikidata_bulk_people import (
+    BulkOptions, extract_people_to_csv, extract_people_to_db, iter_people,
 )
+
+options = BulkOptions(limit=100, interactive=True)
+for person in iter_people(options=options):
+    print(person.qid, person.name)
+
+extract_people_to_csv("people-csv", options=options)
+extract_people_to_db("sqlite:///people.db", options=options)
 ```
 
-Creates one file per relation inside the target directory:
+CSV and database exports use `people`, `person_aliases`, `person_citizenships`, `person_occupations`, `person_spouses`, and `person_images`. Child rows join through `person_qid` → `people.qid`. CSV filenames end in `.csv`; `table_prefix` prefixes database tables.
 
-```
-writers_csv/
-  people.csv
-  person_aliases.csv
-  person_citizenships.csv
-  person_occupations.csv
-  person_spouses.csv
-  person_images.csv
-```
+Database connections use SQLAlchemy URLs; backends other than SQLite may need a driver. Use `iter_people` when the result may not fit in memory.
 
-Use `if_exists` to control behavior when files already exist
-(`"fail"` by default, also `"append"` or `"replace"`):
+## Command line
 
-```python
-extract_people_to_csv("writers_csv/", filter=PeopleFilter(...), if_exists="append")
-```
-
-### Database (SQLAlchemy)
-
-SQLite:
-
-```python
-from wikidata_bulk_people import extract_people_to_db, PeopleFilter, Occupation
-
-extract_people_to_db(
-    "sqlite:///writers.db",
-    filter=PeopleFilter(occupation_qid=Occupation.WRITER, born_after=1900),
-)
-```
-
-PostgreSQL (requires `sqlalchemy[postgresql]` and a driver such as `psycopg2`):
-
-```python
-from wikidata_bulk_people import extract_people_to_db, PeopleFilter, Occupation
-
-extract_people_to_db(
-    "postgresql://user:pass@localhost/mydb",
-    filter=PeopleFilter(occupation_qid=Occupation.WRITER, born_after=1900),
-    table_prefix="wk_",          # tables become wk_people, wk_person_images, …
-    if_exists="upsert",          # update existing rows by qid
-)
-```
-
-Supported `if_exists` values: `"fail"` (default), `"append"`, `"replace"`, `"upsert"`.
-Pipeline state is stored in a `pipeline_state` table so interrupted runs resume
-automatically.
-
-### In-memory
-
-```python
-from wikidata_bulk_people import extract_people_to_memory, PeopleFilter, Occupation
-
-writers = extract_people_to_memory(
-    filter=PeopleFilter(occupation_qid=Occupation.WRITER, born_after=1900),
-)
-print(f"Loaded {len(writers)} writers")
-print(writers[0].name, writers[0].date_of_birth)
-```
-
-Loads all results into a `list[Person]`. For very large result sets prefer
-`iter_people()` to stream records one at a time.
-
-## CLI
-
-```bash
-# Single person
+```sh
 wikidata-bulk-people person Q937
-
-# Bulk — JSONL
-wikidata-bulk-people people --out writers.jsonl --occupation Q36180 --born-after 1900
-
-# Bulk — CSV
-wikidata-bulk-people people --csv-dir writers_csv/ --born-after 1900
-
-# Bulk — SQLite
-wikidata-bulk-people people --db "sqlite:///writers.db" --born-after 1900
-
-# Bulk — PostgreSQL with upsert
-wikidata-bulk-people people \
-  --db "postgresql://user:pass@localhost/mydb" \
-  --table-prefix wk_ \
-  --if-exists upsert \
-  --born-after 1900
-
-# Year-partition mode — avoids WDQS throttling for large queries (>500 results)
-wikidata-bulk-people people --out physicists.jsonl --occupation Q169470 --year-partition
-
+wikidata-bulk-people person "Albert Einstein" --out einstein.json
+wikidata-bulk-people people --out physicists.jsonl --occupation Q169470 --limit 100 --interactive
+wikidata-bulk-people people --csv-dir people-csv --born-after 1900 --born-before 1950 --limit 100 --interactive
+wikidata-bulk-people people --db sqlite:///people.db --limit 100 --interactive
+wikidata-bulk-people people --help
 wikidata-bulk-people version
 ```
 
-Filter flags for `people`: `--occupation QID`, `--citizenship QID`, `--gender QID`,
-`--religion QID`, `--award QID`, `--political-ideology QID`, `--born-after YEAR`,
-`--born-before YEAR`, `--living`, `--deceased`, `--no-wikipedia-article`,
-`--year-partition`.
+Bulk commands require one destination: `--out`, `--csv-dir`, or `--db`. Add `--verbose` for progress. The CLI is also available as `python -m wikidata_bulk_people.cli`.
 
-## Data reference
+## Filters
 
-Each `Person` object contains the following fields:
+`PeopleFilter` fields combine with AND. QID fields accept strings or exported enum members.
 
-| Field | Type | Description |
-|---|---|---|
-| `qid` | `str` | Wikidata entity ID (e.g. `"Q937"`) |
-| `wikipedia_title` | `str \| None` | English Wikipedia article title |
-| `wikipedia_url` | `str \| None` | Full Wikipedia URL |
-| `name` | `str \| None` | Primary English label |
-| `description` | `str \| None` | Short description from Wikidata |
-| `date_of_birth` | `DateValue \| None` | Structured date (year/month/day/calendar/precision) |
-| `date_of_death` | `DateValue \| None` | Structured date |
-| `place_of_birth` | `str \| None` | Place of birth label |
-| `place_of_death` | `str \| None` | Place of death label |
-| `sex_or_gender` | `str \| None` | Gender label |
-| `lead_paragraph` | `str \| None` | First paragraph of the Wikipedia article |
-| `aliases` | `list[str]` | Alternative names |
-| `citizenships` | `list[str]` | Country labels |
-| `occupations` | `list[str]` | Occupation labels |
-| `spouses` | `list[SpouseRecord]` | Structured spouse relationships |
-| `images` | `list[ImageRef]` | Images from Wikimedia Commons |
+| Field | Meaning |
+| --- | --- |
+| `born_after`, `born_before` | Inclusive birth-year bounds |
+| `occupation_qid` | QID or `Occupation` |
+| `citizenship_qid` | QID or `Country` |
+| `gender_qid` | QID or `Gender` |
+| `religion_qid` | QID or `Religion` |
+| `award_qid` | QID or `Award` |
+| `political_ideology_qid` | QID or `PoliticalIdeology` |
+| `has_wikipedia_article` | Require an English article; default `True` |
+| `living` | `True`: no recorded death; `False`: recorded death; `None`: either |
+| `year_partition` | Discover by birth-year partitions; live APIs only, default `False` |
 
-### Sample data — Albert Einstein (Q937)
+QID filters match directly, without expanding subclasses. A missing death statement does not prove someone is alive. Keep `ordered=True`; unordered discovery is unsupported.
 
-**`people` table** (one row per person):
+On the CLI, use `--living` or `--deceased` for death status. `--no-wikipedia-article` allows people both with and without English articles.
 
-| qid | name | description | dob_year | dob_month | dob_day | dod_year | place_of_birth | place_of_death | sex_or_gender |
-|---|---|---|---|---|---|---|---|---|---|
-| Q937 | Albert Einstein | german-born theoretical physicist (1879–1955) | 1879 | 3 | 14 | 1955 | Ulm | Princeton | male |
+## Bulk options
 
-**`person_spouses` table** (one row per marriage):
+| `BulkOptions` field | Default | Purpose |
+| --- | --- | --- |
+| `limit` | `None` | Maximum distinct people |
+| `batch_size` | `50` | People per enrichment batch; 1–50 |
+| `workers` | `4` | HTML enrichment workers; 1–4 |
+| `interactive` | `False` | Foreground requests when a user is waiting |
+| `job_path` | Automatic | Durable job manifest |
+| `cache_path` | Automatic for exports | Live API cache; in-memory for iterators |
+| `cache_ttl` | `86400` | Live cache lifetime, seconds |
+| `public_snapshot` | `None` | Published-source directory |
 
-| person_qid | spouse_qid | name | start_year | start_month | start_day | end_year | end_month | end_day | is_former |
-|---|---|---|---|---|---|---|---|---|---|
-| Q937 | Q76346 | Mileva Marić | 1903 | 1 | 16 | 1919 | 2 | 14 | True |
-| Q937 | Q68761 | Elsa Einstein | 1919 | None | None | 1936 | 12 | 20 | True |
+Bulk calls default to background requests with `maxlag=5`. Set `interactive=True` or CLI `--interactive` for foreground use. Single-person calls default to foreground; use `interactive=False` or `person --background` for background use. Both modes retain rate limiting and retries.
 
-**`person_occupations` table** (one row per occupation):
+## Snapshots
 
-| person_qid | occupation |
-|---|---|
-| Q937 | theoretical physicist |
-| Q937 | philosopher of science |
-| Q937 | inventor |
-| Q937 | … (14 total) | |
+Install the source `[bulk]` extra and set `public_snapshot` with a positive limit:
 
-**`person_images` table** (one row per image):
+```python
+from pathlib import Path
+from wikidata_bulk_people import BulkOptions, extract_people
 
-| person_qid | filename | width | height | license | is_lead |
-|---|---|---|---|---|---|
-| Q937 | Albert Einstein (Nobel).png | 1080 | 1390 | Public domain | False |
-| Q937 | … (21 total) | | | | |
+extract_people(
+    "snapshot-people.jsonl",
+    options=BulkOptions(limit=100_000, public_snapshot=Path("sources")),
+    if_exists="fail",
+)
+```
 
-## Architecture
+```sh
+wikidata-bulk-people people --out snapshot-people.jsonl --limit 100000 --public-snapshot sources --verbose
+```
 
-The library queries the [Wikidata SPARQL endpoint](https://query.wikidata.org/) using a single
-keyset-paginated stream (`FILTER(?item > wd:Qxxx) ORDER BY ?item LIMIT 500`) so interrupted
-runs resume from the last cursor. Four HTTP clients handle Wikidata entities, Wikipedia article
-extracts, Wikimedia Commons image metadata, and rendered HTML respectively — all with per-host
-throttling and exponential-backoff retries.
+## Resume and existing output
 
-## Known issues and future work
+Persistent exports resume by default. Rerun with the same destination, filter, limit, and job path; completed jobs are a no-op. Keep outputs, manifests, and state files together and avoid editing them during a job. Set `BulkOptions(job_path=...)` or CLI `--job` to choose the manifest location.
 
-**WDQS pagination throttling on complex filtered queries** — When multiple filters are combined
-(e.g. `occupation_qid` + `has_wikipedia_article=True`), the WDQS endpoint may silently return
-an empty result set after the first 500-item page instead of returning a timeout error. The
-keyset pagination logic in `QIDStream` is correct; the second page cursor is issued, but
-WDQS silently drops the response under load. For queries that are known to span more than 500
-results, the practical workaround is to split the request into narrower filters (e.g. narrow
-the birth-year range). Birth-year sub-partitioning is available today as the
-`year_partition=True` flag on `PeopleFilter` (and `--year-partition` on the CLI),
-but has not been validated beyond the first two pages.
+For a new job, `if_exists` controls existing output:
 
-**Unordered mode (`ordered=False` / `--unordered`)** — Drops `ORDER BY ?item` from
-the SPARQL query so WDQS can use a faster query plan and is less likely to silently
-drop pages on complex filters. The keyset cursor (`FILTER(?item > wd:Qxxx)`) is kept,
-and the iterator advances it to the **lex-max** QID of each returned page. The trade-off:
-any matching QIDs that lie below the page's lex-max but were not returned in that page
-are skipped permanently. In practice this skip rate is small on tightly-bounded filters,
-and the throughput win on large queries is significant. Default remains `ordered=True`
-(exhaustive, slower, more vulnerable to throttling). The integration tests in
-`tests/integration/test_live.py` measure the empirical skip rate — run them with
-`pytest -m integration` against your filter of interest before relying on unordered mode
-for production extracts.
+| Policy | Behavior |
+| --- | --- |
+| `fail` | Refuse an existing destination |
+| `append` | Add records |
+| `replace` | Replace exported data |
+| `upsert` | Update matching people and insert new ones; database only |
+
+Python JSONL defaults to `append`; CSV, database, and CLI exports default to `fail`. JSONL/CSV append does not deduplicate existing records.
+
+To rebuild, use `resume=False, if_exists="replace"` or CLI `--no-resume --if-exists replace`. Legacy state without a durable manifest requires a new job or destination.
+
+## Records and errors
+
+`Person` contains identity and aliases, birth/death dates and places, gender, citizenships, occupations, spouses, article introduction, image metadata, and source revisions. Convert it to a dictionary with `dataclasses.asdict(person)`.
+
+`DateValue` preserves date precision and calendar. Missing values are `None` or empty lists; unavailable labels fall back to QIDs. `fetched_at` is assembly time; `lastrevid` identifies the Wikidata revision. Images are URLs and metadata, capped at 20 per person.
+
+Public exceptions inherit from `WikiUtilityError`:
+
+| Exception | Meaning |
+| --- | --- |
+| `NotFoundError` | Entity not found |
+| `ExtractionError` | Extraction failed, including non-human entities |
+| `TransportError` | Request failed after retries |
+| `IncompleteRunError` | Job has failed or unexported records; resume to retry |
+
+Per-record errors are stored in the manifest's `work.error`. CLI exit codes: `1` for handled extraction/configuration errors, `2` for handled transport errors.
+
+## Benchmarks
+
+**Seconds, median of three runs.** Bulk calls extract 10 people with `award_qid="Q38104"` and an English article, using foreground requests, default batch/worker settings, and fresh jobs and live caches. CLI times include process startup. These small workloads include network costs; capped live and snapshot searches may select different people.
+
+| Python API | Live HTTP | Prepared snapshot |
+| --- | ---: | ---: |
+| `extract_person("Q937")` | 15.215 | Unsupported |
+| `extract_person("Albert Einstein")` | 15.210 | Unsupported |
+| `iter_people` — fully consumed | 5.973 | 0.254 |
+| `extract_people_to_memory` | 5.669 | 0.255 |
+| `extract_people` — JSONL | 6.039 | 0.314 |
+| `extract_people_to_csv` | 6.216 | 0.328 |
+| `extract_people_to_db` — SQLite | 6.434 | 0.640 |
+
+Iterator time to first person: **5.953 s live / 0.250 s prepared**; records are yielded after batch enrichment.
+
+| CLI command | Live HTTP | Prepared snapshot |
+| --- | ---: | ---: |
+| `person Q937` — stdout | 15.514 | Unsupported |
+| `person "Albert Einstein" --out` | 15.392 | Unsupported |
+| `people --out` — JSONL | 6.387 | 0.577 |
+| `people --csv-dir` | 6.273 | 0.583 |
+| `people --db` — SQLite | 6.751 | 0.975 |
+
+**First-use snapshots:** preparation took **1,073.584 s**; the first JSONL export including preparation took **1,073.943 s (~18 min)** for 10 people, with **37.164 GB** of Wikipedia downloads (one run). Prepared timings above reuse those sources and exclude preparation.
+
+<details>
+<summary>Resume, output policies, and CLI startup</summary>
+
+Seconds, one run per cell. Completed resume adds no people; interrupted resume finishes 5 of 10, retaining the job's cache. Append, replace, and upsert each process 10 people with a fresh cache. Append uses existing output (10 records for JSONL/CSV, one disjoint person for SQLite); replace and upsert start with 10 people.
+
+| Entry point | Source | Resume (0 new) | Resume (5 new) | Append | Replace | Upsert |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| API JSONL | Live | 0.171 | 3.809 | 6.108 | 5.628 | — |
+| API JSONL | Prepared | 0.170 | 0.284 | 0.304 | 0.290 | — |
+| API CSV | Live | 0.174 | 3.458 | 6.181 | 5.686 | — |
+| API CSV | Prepared | 0.175 | 0.301 | 0.359 | 0.319 | — |
+| API SQLite | Live | 0.520 | 3.540 | 7.133 | 6.414 | 5.958 |
+| API SQLite | Prepared | 0.474 | 0.550 | 0.597 | 0.654 | 0.596 |
+| CLI JSONL | Live | 0.400 | 3.577 | 6.632 | 5.903 | — |
+| CLI JSONL | Prepared | 0.421 | 0.526 | 0.536 | 0.602 | — |
+| CLI CSV | Live | 0.451 | 3.605 | 5.852 | 6.646 | — |
+| CLI CSV | Prepared | 0.413 | 0.545 | 0.565 | 0.568 | — |
+| CLI SQLite | Live | 0.769 | 3.740 | 6.498 | 6.870 | 6.340 |
+| CLI SQLite | Prepared | 0.761 | 0.935 | 0.895 | 0.978 | 0.888 |
+
+CLI startup, median of three runs: `version` **0.174 s**, `--help` **0.175 s**, `person --help` **0.176 s**, `people --help` **0.177 s**.
+
+</details>
 
 ## License
 
-MIT
+[MIT](LICENSE). Extracted text and media retain their source licenses and attribution requirements.

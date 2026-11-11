@@ -24,6 +24,31 @@ scripts/explore_s*.py
 detectives_csv/
 nihilism_csv/
 
-# Local Claude Code config — never tracked
 CLAUDE.md
 .claude/
+
+.wikidata-bulk-people/
+*.state.json
+*.job.sqlite3*
+*.job.sqlite3.cache*
+coverage.json
+
+/.runs/
+/runs/
+/sources/
+/public-sources/
+/people.jsonl
+/people_csv/
+/people.db
+/person.json
+*.parquet
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.partial
+*.bundle
+
+/audit/
+/docs/
+/benchmarks/
+/distribution-check.json

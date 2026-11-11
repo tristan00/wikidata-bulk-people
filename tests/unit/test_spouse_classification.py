@@ -1,5 +1,3 @@
-"""Unit tests for spouse is_former classification logic in _util.py."""
-
 from wikidata_bulk_people._util import _classify_spouse_claim
 
 
@@ -10,7 +8,6 @@ def _spouse_claim(
     has_end_cause: bool = False,
     has_start_time: bool = False,
 ) -> dict:
-    """Build a synthetic P26 (spouse) claim dict."""
     qualifiers: dict = {}
     if has_end_time:
         qualifiers["P582"] = [

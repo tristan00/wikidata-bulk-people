@@ -1,122 +1,131 @@
-"""Unit tests for QIDStream cursor-advance behavior in ordered vs unordered mode.
-
-These tests mock out the SPARQL HTTP layer; no network is touched.
-"""
-
-from typing import Any
+import json
 from unittest.mock import patch
+import pytest
+from rdflib import Graph, Namespace, URIRef, Literal
+XSD_DATE = URIRef("http://www.w3.org/2001/XMLSchema#date")
+from wikidata_bulk_people._discovery import QIDStream, _build_query, _SparqlClient
+from wikidata_bulk_people import PeopleFilter, TransportError
 
-from wikidata_bulk_people._extract import QIDStream
-from wikidata_bulk_people._models import PeopleFilter
+WD = Namespace("http://www.wikidata.org/entity/")
+WDT = Namespace("http://www.wikidata.org/prop/direct/")
+
+def binding(qid):
+    return {"item": {"type": "uri", "value": str(WD[qid])}}
+
+def test_query_executes_with_string_cursor_and_distinct(monkeypatch):
+    import wikidata_bulk_people._discovery as module
+    monkeypatch.setattr(module, "_PAGE_SIZE", 2)
+    graph = Graph()
+    for qid in ("Q1", "Q2", "Q3", "Q10", "Q100"):
+        graph.add((WD[qid], WDT.P31, WD.Q5))
+
+        graph.add((WD[qid], WDT.P569, Literal("1900-01-01", datatype=XSD_DATE)))
+        graph.add((WD[qid], WDT.P569, Literal("1901-01-01", datatype=XSD_DATE)))
+    stream = QIDStream(PeopleFilter(has_wikipedia_article=False, born_after=1800), "test")
+    queries = []
+    def query(q):
+        queries.append(q)
+        return json.loads(graph.query(q, initNs={"wd": WD, "wdt": WDT}).serialize(format="json"))["results"]["bindings"]
+    with patch.object(stream._sparql, "run_query", side_effect=query):
+        assert list(stream) == ["Q1", "Q10", "Q100", "Q2", "Q3"]
+    assert len(queries) == 3
+    assert "SELECT DISTINCT" in queries[0] and "STR(?item)" in queries[1]
+
+def test_unordered_is_explicitly_rejected():
+    with pytest.raises(ValueError, match="ordered=False"):
+        QIDStream(PeopleFilter(ordered=False), "test")
 
 
-def _binding(qid: str) -> dict[str, Any]:
-    """Build a fake SPARQL binding dict for a QID."""
-    return {"item": {"value": f"http://www.wikidata.org/entity/{qid}"}}
+def test_bounded_discovery_executes_filter_once_and_orders_selected_membership():
+    graph = Graph()
+    for qid, year in (("Q20", 1900), ("Q3", 1901), ("Q11", 1899), ("Q10", 1900)):
+        graph.add((WD[qid], WDT.P31, WD.Q5))
+        graph.add((WD[qid], WDT.P569, Literal(f"{year}-01-01", datatype=XSD_DATE)))
+    stream = QIDStream(PeopleFilter(has_wikipedia_article=False, born_after=1900), "test")
+    queries = []
+    def query(q):
+        queries.append(q)
+        return json.loads(graph.query(q, initNs={"wd": WD, "wdt": WDT}).serialize(format="json"))["results"]["bindings"]
+    with patch.object(stream._sparql, "run_query", side_effect=query):
+        pages = list(stream.iter_pages(snapshot_limit=1000))
+    assert len(queries) == len(pages) == 1
+    assert pages[0].qids == ["Q10", "Q20", "Q3"]
+    assert "ORDER BY" not in queries[0]
 
 
-def _short_page(qids: list[str]) -> list[dict[str, Any]]:
-    """A page short enough to terminate iteration (< _PAGE_SIZE)."""
-    return [_binding(q) for q in qids]
+@pytest.mark.parametrize("bindings", [[{}], [binding("Q1"), binding("Q1")],
+                                     [binding("Q1"), binding("Q2"), binding("Q3")]])
+def test_bounded_discovery_rejects_invalid_membership_before_yielding(bindings):
+    stream = QIDStream(PeopleFilter(), "test")
+    with patch.object(stream._sparql, "run_query", return_value=bindings), pytest.raises(TransportError):
+        next(stream.iter_pages(snapshot_limit=2))
 
 
-def _full_page(qids: list[str]) -> list[dict[str, Any]]:
-    """A page padded out to exactly _PAGE_SIZE so iteration continues."""
-    from wikidata_bulk_people._extract import _PAGE_SIZE
+@pytest.mark.parametrize("kwargs", [{"snapshot_limit": 0}, {"snapshot_limit": 100001},
+                                    {"snapshot_limit": 20, "start_after": "Q1"},
+                                    {"snapshot_limit": 20, "start_year": 1900}])
+def test_bounded_discovery_rejects_invalid_bounds_or_keyset_resume(kwargs):
+    with pytest.raises(ValueError):
+        list(QIDStream(PeopleFilter(), "test").iter_pages(**kwargs))
 
-    base = [_binding(q) for q in qids]
-    pad_count = _PAGE_SIZE - len(base)
-    pad = [_binding(f"Q9999{i:04d}") for i in range(pad_count)]
-    return base + pad
+@pytest.mark.parametrize("page", [[binding("Q2"), binding("Q1")], [{}], [binding("Qx")]])
+def test_invalid_pages_fail_instead_of_reporting_completion(page):
+    stream = QIDStream(PeopleFilter(), "test")
+    with patch.object(stream._sparql, "run_query", return_value=page), pytest.raises(TransportError):
+        list(stream)
 
-
-class TestIterSingleOrdered:
-    """Default ordered mode: cursor advances to last yielded QID."""
-
-    def test_terminates_on_short_page(self) -> None:
-        stream = QIDStream(filter=PeopleFilter(), user_agent="test/1.0")
-        with patch.object(stream._sparql, "run_query", return_value=_short_page(["Q1", "Q2", "Q3"])):
-            result = list(stream)
-        assert result == ["Q1", "Q2", "Q3"]
-
-    def test_cursor_passed_to_next_page(self) -> None:
-        """In ordered mode, last_qid is the last yielded — same as the page's natural max."""
-        stream = QIDStream(filter=PeopleFilter(), user_agent="test/1.0")
-        captured_queries: list[str] = []
-
-        def fake_run(query: str) -> list[dict[str, Any]]:
-            captured_queries.append(query)
-            if len(captured_queries) == 1:
-                return _full_page(["Q5", "Q10", "Q20"])  # Q20 is last yielded
-            return _short_page(["Q30"])
-
-        with patch.object(stream._sparql, "run_query", side_effect=fake_run):
+def test_cursor_must_advance(monkeypatch):
+    monkeypatch.setattr("wikidata_bulk_people._discovery._PAGE_SIZE", 2)
+    stream = QIDStream(PeopleFilter(), "test")
+    with patch.object(stream._sparql, "run_query", return_value=[binding("Q1"), binding("Q2")]):
+        with pytest.raises(TransportError, match="advance|ordered"):
             list(stream)
 
-        assert len(captured_queries) == 2
-        # First page: no cursor
-        assert "FILTER(?item >" not in captured_queries[0]
-        # Second page: cursor is last yielded from page 1, which (with ordering) was Q9999XXXX (the pad).
-        # We don't need to assert the exact cursor — just that it's a valid keyset cursor on the last
-        # yielded value.
-        assert "FILTER(?item > wd:Q9999" in captured_queries[1]
+def test_year_bounds_and_duplicate_full_page_make_progress(monkeypatch):
+    monkeypatch.setattr("wikidata_bulk_people._discovery._PAGE_SIZE", 2)
+    stream = QIDStream(PeopleFilter(year_partition=True, born_after=1900, born_before=1901), "test")
+    calls = []
+    def query(q):
+        calls.append(q)
+        return [] if "STR(?item) >" in q else [binding("Q1"), binding("Q2")]
+    with patch.object(stream._sparql, "run_query", side_effect=query):
+        assert list(stream) == ["Q1", "Q2"]
+    assert len(calls) == 4
+    assert all("YEAR(?dob) >= 1900" in q and "YEAR(?dob) <= 1901" in q for q in calls)
+    assert all("NO_DOB" not in q for q in calls)
+
+def test_unbounded_year_partitions_include_tails_and_unknown_birth():
+    stream = QIDStream(PeopleFilter(year_partition=True), "test")
+    buckets = stream._buckets()
+    assert buckets[0] == "BEFORE" and buckets[-2:] == ["AFTER", "NO_DOB"]
+    with pytest.raises(ValueError, match="partition"):
+        list(stream.iter_pages(start_year="bogus"))
+
+@pytest.mark.parametrize("data", [{}, {"results": {}}, {"results": {"bindings": None}}])
+def test_malformed_sparql_is_not_empty_success(data):
+    client = _SparqlClient("test")
+    with patch.object(client, "_get", return_value=data), pytest.raises(TransportError):
+        client.run_query("SELECT ?item WHERE {}")
+
+def test_qid_injection_rejected():
+    with pytest.raises(ValueError, match="Invalid"):
+        _build_query(PeopleFilter(occupation_qid="Q1 . } UNION {"), None)
 
 
-class TestIterSingleUnordered:
-    """Unordered mode: cursor advances to lex-max of returned QIDs (string max)."""
-
-    def test_terminates_on_short_page(self) -> None:
-        stream = QIDStream(filter=PeopleFilter(ordered=False), user_agent="test/1.0")
-        with patch.object(
-            stream._sparql,
-            "run_query",
-            return_value=_short_page(["Q1", "Q200", "Q3"]),
-        ):
-            result = list(stream)
-        assert sorted(result) == ["Q1", "Q200", "Q3"]
-
-    def test_cursor_advances_to_lex_max_not_last_yielded(self) -> None:
-        """The page's "last yielded" QID is meaningless when results are unordered.
-
-        The cursor must be the LEX-max of the page so SPARQL ``FILTER(?item > wd:X)``
-        on the next page actually skips the same prefix WDQS just returned.
-        """
-        stream = QIDStream(filter=PeopleFilter(ordered=False), user_agent="test/1.0")
-        captured_queries: list[str] = []
-
-        def fake_run(query: str) -> list[dict[str, Any]]:
-            captured_queries.append(query)
-            if len(captured_queries) == 1:
-                # Page 1 returns out-of-order. Lex order: Q10000 < Q5 < Q700 < Q800.
-                # So lex-max is "Q800".
-                return _full_page(["Q5", "Q10000", "Q800", "Q700"])
-            return _short_page([])  # Empty page on second call → terminate.
-
-        with patch.object(stream._sparql, "run_query", side_effect=fake_run):
-            list(stream)
-
-        assert len(captured_queries) == 2
-        # Lex-max of {"Q5", "Q10000", "Q800", "Q700", and pad "Q9999XXXX"} is "Q9999XXXX"
-        # because "Q9999XXXX" > "Q800" lexicographically. So the cursor should be the
-        # max of all returned QIDs (including pad), which starts with "Q9999".
-        assert "FILTER(?item > wd:Q9999" in captured_queries[1]
-
-    def test_cursor_uses_string_max_not_numeric_max(self) -> None:
-        """Verify SPARQL IRI ordering: 'Q5' > 'Q1000' as strings (because '5' > '1')."""
-        stream = QIDStream(filter=PeopleFilter(ordered=False), user_agent="test/1.0")
-        captured_queries: list[str] = []
-
-        def fake_run(query: str) -> list[dict[str, Any]]:
-            captured_queries.append(query)
-            if len(captured_queries) == 1:
-                # Pure short page so iteration terminates after one call.
-                # Numeric max is Q1000; lex max is Q5.
-                return _short_page(["Q5", "Q1000"])
-            return []
-
-        with patch.object(stream._sparql, "run_query", side_effect=fake_run):
-            list(stream)
-
-        # We don't follow up since first page was short — iteration ended.
-        # But the principle holds: max(["Q5", "Q1000"]) == "Q5" in Python string ordering.
-        assert max(["Q5", "Q1000"]) == "Q5"
+def test_unbounded_partitions_include_unknown_and_unparseable_birth_values(monkeypatch):
+    from rdflib import BNode
+    monkeypatch.setattr("wikidata_bulk_people._discovery._YP_YEAR_MIN", 1900)
+    monkeypatch.setattr("wikidata_bulk_people._discovery._YP_YEAR_MAX", 1901)
+    graph = Graph()
+    for number in range(1, 7):
+        graph.add((WD[f"Q{number}"], WDT.P31, WD.Q5))
+    graph.add((WD.Q1, WDT.P569, BNode()))
+    graph.add((WD.Q3, WDT.P569, Literal("1900-01-01", datatype=XSD_DATE)))
+    graph.add((WD.Q4, WDT.P569, Literal("1899-01-01", datatype=XSD_DATE)))
+    graph.add((WD.Q5, WDT.P569, Literal("1902-01-01", datatype=XSD_DATE)))
+    graph.add((WD.Q6, WDT.P569, Literal("unknown")))
+    stream = QIDStream(PeopleFilter(has_wikipedia_article=False, year_partition=True), "test")
+    def query(q):
+        return json.loads(graph.query(q, initNs={"wd": WD, "wdt": WDT}).serialize(format="json"))["results"]["bindings"]
+    with patch.object(stream._sparql, "run_query", side_effect=query):
+        assert sorted(stream) == [f"Q{n}" for n in range(1, 7)]
